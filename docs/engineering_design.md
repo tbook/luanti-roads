@@ -2,6 +2,9 @@
 
 Status: proposed design, ready to guide a first implementation.
 
+Precise shared interfaces, geometric conventions, lifecycle rules, and worked
+examples are specified in [the minimal planner contract](planner_contract.md).
+
 ## Purpose
 
 Demonstrate that a bounded planner can find a reasonable road through actual
