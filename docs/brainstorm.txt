@@ -1,0 +1,7 @@
+These are some loose ideas for this mod.  They should be adjusted to help us align on something buildable, maintainable and playable.  Nothing here is set in stone - just a starting point for further reflection and elaboration.
+
+General idea: It would be good for towns and villages to be connected by a network of roads.  They should be interesting to follow, showing the landscape, variations in the paving, interesting bridges and tunnels, and some road-side landmarks.
+
+Some implementation thoughts: Every town should have 4 roads coming from it.  One growing east, north, south, west.  When terrain is loaded containing a road, it should grow farther in its preferred direction.  Rather than going in a straight line, it should twist with the terrain, as an actual road might that was built to keep a moderate grade.  Canyons should be bridged, relatively short mountains tunneled through at a narrow point.  If there is no way forward, the road can end.  Most of all, though, a road should seek to join up with a road growing in the opposite direction (a northbound road joins with a southbound road to complete its journey).  Villages might have a single pair of roads, or simply count as a valid ending point for roads growing from towns.
+
+This should work well with the towns mod, although it might be nice if some version of it could function without it.
