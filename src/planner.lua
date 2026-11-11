@@ -67,6 +67,7 @@ function planner.new(terrain, request, config)
     end
     if config ~= nil and type(config) ~= 'table' then return nil, failure('invalid_config', 'config must be a table') end
     config = config or {}
+    local road_material = config.road_material
     if config.weights ~= nil and type(config.weights) ~= 'table' then return nil, failure('invalid_config', 'weights must be a table') end
     local weights = {}
     for k,v in pairs(defaults) do
@@ -138,7 +139,7 @@ function planner.new(terrain, request, config)
         for i=#reversed,1,-1 do points[#points+1] = reversed[i] end
         for i=#headings,1,-1 do hs[#hs+1] = headings[i] end
         local route = {request=copy(self.request), centerline=points, headings=hs,
-            cost=self.goal_cost, parameters={weights=copy(weights)}, metrics=copy(self.metrics)}
+            cost=self.goal_cost, parameters={weights=copy(weights), road_material=road_material}, metrics=copy(self.metrics)}
         route.metrics.length, route.metrics.ascent, route.metrics.descent = 0,0,0
         route.metrics.max_grade, route.metrics.turn_count, route.metrics.cut_count, route.metrics.fill_count = 0,0,0,0
         local r = self.goal_record
@@ -190,7 +191,7 @@ function planner.new(terrain, request, config)
                 if rec.heading == nil then headings = {0,1,2,3,4,5,6,7}
                 else headings = {rec.heading,(rec.heading+1)%8,(rec.heading+7)%8} end
                 for _,h in ipairs(headings) do
-                    local edge = edges.evaluate(terrain,a,rec,h,{weights=weights})
+                    local edge = edges.evaluate(terrain,a,rec,h,{weights=weights, road_material=road_material})
                     if not edge.ok then
                         if not local_errors[edge.code] then return finish('failed',failure(edge.code,edge.reason,{position=edge.position})) end
                         self.metrics.rejections[edge.code] = (self.metrics.rejections[edge.code] or 0) + 1

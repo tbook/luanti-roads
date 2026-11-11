@@ -86,7 +86,7 @@ end
 -- Validate one column's rendered road, support, excavation, and headroom.
 -- `counts` is nil when validating a previous segment in a join: that overlap
 -- must remain feasible, but is charged to the newly proposed segment only.
-local function check_column(column, p, counts)
+local function check_column(column, p, counts, road_material)
     local g, r = column.ground_y, p.y
     if math.abs(r - g) > 2 then
         return "earthwork", "road surface is more than two nodes from natural ground", p
@@ -143,8 +143,10 @@ local function check_column(column, p, counts)
         return road.kind == "water" and "water" or road.kind == "unknown" and "unknown"
             or "structure", "road surface is occupied", p
     end
-    local code, reason, pos = check_write(road, {x = p.x, y = r, z = p.z})
-    if code then return code, reason, pos end
+    if not (road_material ~= nil and road.kind == "natural" and road.material == road_material) then
+        local code, reason, pos = check_write(road, {x = p.x, y = r, z = p.z})
+        if code then return code, reason, pos end
+    end
 
     for y = r + 1, r + 3 do
         local entry = node(column, y)
@@ -162,11 +164,11 @@ local function check_column(column, p, counts)
     return nil
 end
 
-local function validate_columns(terrain, columns, counts)
+local function validate_columns(terrain, columns, counts, road_material)
     for _, p in ipairs(columns) do
         local column, code, reason = terrain_column(terrain, p.x, p.z)
         if not column then return code, reason, p end
-        local issue, why, position = check_column(column, p, counts)
+        local issue, why, position = check_column(column, p, counts, road_material)
         if issue then return issue, why, position end
     end
     return nil
@@ -219,7 +221,7 @@ function edges.evaluate(terrain, anchor, state, next_heading, config)
     local segment, err = raster.segment(from, to)
     if not segment then return fail(err.code, err.reason, err.position) end
     local counts = {cut = 0, fill = 0, cut_positions = {}}
-    local issue, why, position = validate_columns(terrain, segment.columns, counts)
+    local issue, why, position = validate_columns(terrain, segment.columns, counts, config and config.road_material)
     if issue then return fail(issue, why, position) end
 
     if state.heading ~= nil then
@@ -235,7 +237,7 @@ function edges.evaluate(terrain, anchor, state, next_heading, config)
         local joined
         joined, err = raster.join(prior_segment, segment)
         if not joined then return fail(err.code, err.reason, err.position) end
-        issue, why, position = validate_columns(terrain, joined.columns, nil)
+        issue, why, position = validate_columns(terrain, joined.columns, nil, config and config.road_material)
         if issue then return fail(issue, why, position) end
     end
 

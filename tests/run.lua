@@ -285,3 +285,4 @@ end)
 
 print("ok - " .. count .. " planner geometry/edge tests")
 dofile("tests/planner.lua")
+dofile("tests/plans.lua")

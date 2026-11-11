@@ -127,7 +127,10 @@ directory. The caller loads `src/raster.lua` using the mod path and injects it
 once with `edges.set_raster(raster)` before calling `edges.evaluate`. An absent
 or invalid injected raster is an `invalid_config` failure. `config.weights`,
 when supplied, is a table with optional `slope`, `turn`, `cut`, and `fill` values;
-each omitted value uses its documented default.
+each omitted value uses its documented default. `config.road_material` may
+supply the adapter-owned road material ID: an existing natural road node with
+that exact ID is a no-op and needs no write permission. Without the ID, road
+surface replacement is conservatively treated as a write.
 
 `edges.evaluate(terrain, anchor, state, next_heading, config)` returns either
 `{ok=true, next_state=..., segment=..., cost=..., metrics=...}` or
@@ -174,6 +177,7 @@ turn count, cut count, and fill count.
 local search, err = planner.new(terrain, request, config)
 -- request.start / request.goal = {x,y,z}; resolved and lattice-aligned
 -- request.provenance = {start=Endpoint, goal=Endpoint}; see below
+-- config.road_material optionally identifies no-op existing road nodes
 local report = search:step({max_expansions=1000, deadline=...}, clock)
 search:cancel()
 ```
@@ -216,8 +220,11 @@ Success means shortest cost in this graph subject to the budgets, not a promise
 that the later composition will succeed. The heuristic is horizontal Euclidean
 distance. A budget failure is not `bounded_no_route`.
 
-`plans.compose(terrain, route, config)` rerasterizes all segments with the shared
-rasterizer, checks all overlaps (including nonconsecutive ones), and emits:
+`plans.compose(terrain, route, config)` uses dependencies installed with
+`plans.set_dependencies(raster, edges)` and requires `config.road_material`, the
+adapter-owned cobblestone material ID, to recognize existing road nodes. It
+rerasterizes all segments with the shared rasterizer, checks all overlaps
+(including nonconsecutive ones), and emits:
 
 ```lua
 { version=1, planner_version=1, raster_version=1,
@@ -245,7 +252,11 @@ material, and air to air. Identical writes deduplicate; different material or
 kind at one coordinate, different surface heights at one column, and road/support
 inside another segment's clearance cause `composition_failed`. Check the final
 surface's cardinal rises too. Omit no-op writes against the snapshot; retain their
-expectations where they matter. Cap actual deduplicated writes at 50,000.
+expectations where they matter. Cap actual deduplicated writes at 50,000; `config.max_writes` may lower this
+limit for testing or stricter callers. Independently cap the number of distinct
+surface columns at 50,000 to bound allocations even when most writes are no-ops.
+`expectations` is a sorted list of `{x,y,z,kind,material,protected}` records;
+material IDs retain their adapter-owned identity.
 
 ## Errors, limits, and lifecycle ownership
 
