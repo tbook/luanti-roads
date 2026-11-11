@@ -1,6 +1,9 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 -- Run from the repository root: lua5.1 tests/run.lua
 local raster = dofile("src/raster.lua")
+local edges = dofile("src/edges.lua")
+local terrain_fixture = dofile("tests/terrain.lua")
+assert(edges.set_raster(raster))
 local count = 0
 local function test(name, fn)
     local ok, err = pcall(fn)
@@ -136,4 +139,148 @@ test("invalid inputs", function()
     assert(not segment and err.code == "invalid_endpoint")
 end)
 
-print("ok - " .. count .. " raster tests")
+local function flat_fixture()
+    return terrain_fixture.rectangle(-5, 10, -5, 8, 0)
+end
+
+test("edge evaluator accepts flat road and reports exact metrics", function()
+    local result = edges.evaluate(flat_fixture(), {x = 0, z = 0},
+        {i = 0, j = 0, heading = nil}, 0)
+    assert(result.ok)
+    assert(result.cost == 4 and result.metrics.length == 4)
+    assert(result.metrics.grade == 0 and result.metrics.turn_count == 0)
+    assert(result.metrics.cut_count == 0 and result.metrics.fill_count == 0)
+    assert(#result.segment.columns == 21)
+    assert(result.next_state.i == 1 and result.next_state.j == 0)
+end)
+
+test("grade, earthwork, terrain status, and missing samples reject stably", function()
+    local t = flat_fixture()
+    for x = 4, 10 do
+        for z = -5, 8 do t:set_column(x, z, 2) end
+    end
+    local result = edges.evaluate(t, {x = 0, z = 0}, {i = 0, j = 0}, 0)
+    assert(not result.ok and result.code == "grade")
+
+    t = flat_fixture()
+    t:set_column(2, 1, -3)
+    result = edges.evaluate(t, {x = 0, z = 0}, {i = 0, j = 0}, 0)
+    assert(not result.ok and result.code == "earthwork")
+
+    t = flat_fixture()
+    t:set_column(2, 1, 0, {status = "water"})
+    result = edges.evaluate(t, {x = 0, z = 0}, {i = 0, j = 0}, 0)
+    assert(not result.ok and result.code == "water")
+
+    t = terrain_fixture.rectangle(-1, 4, -1, 1, 0)
+    result = edges.evaluate(t, {x = 0, z = 0}, {i = 0, j = 0}, 0)
+    assert(not result.ok and result.code == "outside")
+
+    t = flat_fixture()
+    t.columns["2:1"] = nil
+    result = edges.evaluate(t, {x = 0, z = 0}, {i = 0, j = 0}, 0)
+    assert(not result.ok and result.code == "unknown")
+end)
+
+test("fill, blocked headroom, and edge-only protection are checked", function()
+    local t = flat_fixture()
+    t:set_column(2, 1, -2)
+    local result = edges.evaluate(t, {x = 0, z = 0}, {i = 0, j = 0}, 0)
+    assert(result.ok and result.metrics.fill_count > 0)
+    assert(result.cost >= result.metrics.length)
+
+    t = flat_fixture()
+    t:set_node(2, 0, 1, {kind = "obstacle", protected = false})
+    result = edges.evaluate(t, {x = 0, z = 0}, {i = 0, j = 0}, 0)
+    assert(not result.ok and result.code == "clearance")
+
+    t = flat_fixture()
+    t:set_node(2, 1, 0, {kind = "natural", material = "stone", protected = true})
+    result = edges.evaluate(t, {x = 0, z = 0}, {i = 0, j = 0}, 0)
+    assert(not result.ok and result.code == "protected")
+
+    t = flat_fixture()
+    t:set_column(2, 1, -2)
+    t:set_node(2, 1, -1, {kind = "air", protected = true})
+    result = edges.evaluate(t, {x = 0, z = 0}, {i = 0, j = 0}, 0)
+    assert(not result.ok and result.code == "protected")
+
+    t = flat_fixture()
+    t:set_node(2, 1, 0, {kind = "air", protected = true})
+    result = edges.evaluate(t, {x = 0, z = 0}, {i = 0, j = 0}, 0)
+    assert(not result.ok and result.code == "protected")
+
+    t = flat_fixture()
+    t:set_node(2, 1, 0, {kind = "air"})
+    result = edges.evaluate(t, {x = 0, z = 0}, {i = 0, j = 0}, 0)
+    assert(not result.ok and result.code == "unknown")
+end)
+
+test("natural excavation is counted once across cut and headroom ranges", function()
+    local t = flat_fixture()
+    t:set_column(2, 0, 2)
+    local result = edges.evaluate(t, {x = 0, z = 0}, {i = 0, j = 0}, 0)
+    assert(result.ok)
+    assert(result.metrics.cut_count == 2)
+end)
+
+test("joins validate prior terrain and add turn cost", function()
+    local t = flat_fixture()
+    local result = edges.evaluate(t, {x = 0, z = 0},
+        {i = 1, j = 0, heading = 0}, 1)
+    assert(result.ok)
+    assert(result.metrics.turn_count == 1)
+    assert(result.cost == math.sqrt(32) + 2)
+
+    t:set_node(0, 0, 1, {kind = "obstacle", protected = false})
+    result = edges.evaluate(t, {x = 0, z = 0},
+        {i = 1, j = 0, heading = 0}, 1)
+    assert(not result.ok and result.code == "clearance")
+end)
+
+test("cost weights affect only their intended terms and reject invalid values", function()
+    local flat = edges.evaluate(flat_fixture(), {x = 0, z = 0}, {i = 0, j = 0}, 0)
+    local turned = edges.evaluate(flat_fixture(), {x = 0, z = 0},
+        {i = 0, j = 0, heading = 0}, 1)
+    local no_turn = edges.evaluate(flat_fixture(), {x = 0, z = 0},
+        {i = 0, j = 0, heading = 0}, 1, {weights = {turn = 0}})
+    assert(flat.cost == 4 and turned.cost == math.sqrt(32) + 2)
+    assert(no_turn.cost == math.sqrt(32))
+    local bad = edges.evaluate(flat_fixture(), {x = 0, z = 0},
+        {i = 0, j = 0}, 0, {weights = {cut = -1}})
+    assert(not bad.ok and bad.code == "invalid_config")
+    bad = edges.evaluate(flat_fixture(), {x = 0, z = 0},
+        {i = 0, j = 0}, 0, {weights = false})
+    assert(not bad.ok and bad.code == "invalid_config")
+
+    local slope = flat_fixture()
+    for x = -5, 10 do
+        for z = -5, 8 do
+            local y = math.floor(math.max(0, math.min(1, x / 4)) + 0.5)
+            slope:set_column(x, z, y)
+        end
+    end
+    local weighted = edges.evaluate(slope, {x = 0, z = 0}, {i = 0, j = 0}, 0)
+    local unweighted = edges.evaluate(slope, {x = 0, z = 0}, {i = 0, j = 0}, 0,
+        {weights = {slope = 0}})
+    assert(weighted.ok and unweighted.ok and weighted.cost - unweighted.cost == 16)
+
+    local cut = flat_fixture()
+    cut:set_column(2, 0, 2)
+    weighted = edges.evaluate(cut, {x = 0, z = 0}, {i = 0, j = 0}, 0)
+    unweighted = edges.evaluate(cut, {x = 0, z = 0}, {i = 0, j = 0}, 0,
+        {weights = {cut = 0}})
+    assert(weighted.ok and unweighted.ok)
+    assert(weighted.cost - unweighted.cost == weighted.metrics.cut_count)
+
+    local fill = flat_fixture()
+    local fill_column = fill:set_column(2, 0, -2)
+    fill_column.material = {interned = "fixture-stone"}
+    weighted = edges.evaluate(fill, {x = 0, z = 0}, {i = 0, j = 0}, 0)
+    unweighted = edges.evaluate(fill, {x = 0, z = 0}, {i = 0, j = 0}, 0,
+        {weights = {fill = 0}})
+    assert(weighted.ok and unweighted.ok)
+    assert(weighted.cost - unweighted.cost == weighted.metrics.fill_count)
+end)
+
+print("ok - " .. count .. " planner geometry/edge tests")

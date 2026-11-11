@@ -122,6 +122,13 @@ so start and goal need no special cap renderer.
 
 ## Feasibility and costs
 
+The pure edge module does not load sibling files from the process working
+directory. The caller loads `src/raster.lua` using the mod path and injects it
+once with `edges.set_raster(raster)` before calling `edges.evaluate`. An absent
+or invalid injected raster is an `invalid_config` failure. `config.weights`,
+when supplied, is a table with optional `slope`, `turn`, `cut`, and `fill` values;
+each omitted value uses its documented default.
+
 `edges.evaluate(terrain, anchor, state, next_heading, config)` returns either
 `{ok=true, next_state=..., segment=..., cost=..., metrics=...}` or
 `{ok=false, code=..., position=..., reason=...}`. State is `{i,j,heading}`;
