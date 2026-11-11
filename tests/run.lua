@@ -284,3 +284,4 @@ test("cost weights affect only their intended terms and reject invalid values", 
 end)
 
 print("ok - " .. count .. " planner geometry/edge tests")
+dofile("tests/planner.lua")
