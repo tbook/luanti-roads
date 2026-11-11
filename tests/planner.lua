@@ -46,6 +46,19 @@ test('barrier and budget failures',function()
         assert(r.error.code == case.code)
     end
 end)
+test('unsnapped endpoint ground must match the surveyed column',function()
+    local t = fixtures.rectangle(-9,21,-9,9,0)
+    local req = request(8,0)
+    req.provenance.goal.requested = {x=7,y=0,z=0}
+    req.provenance.goal.ground = {x=7,y=0,z=0}
+    assert(planner.new(t,req))
+    t:set_column(7,0,0,{status='water'})
+    local s,err = planner.new(t,req)
+    assert(not s and err.code == 'invalid_endpoint' and err.position.x == 7)
+    t:set_column(7,0,10)
+    s,err = planner.new(t,req)
+    assert(not s and err.code == 'invalid_endpoint' and err.position.x == 7)
+end)
 test('road detours through a pass around a high ridge',function()
     local t = fixtures.rectangle(-17,33,-25,25,0)
     for x=5,11 do for z=-12,8 do t:set_column(x,z,4) end end
@@ -66,6 +79,46 @@ test('deadline pending and cancellation',function()
     assert(route_string(r.route) == route_string(expected.route))
     s = assert(planner.new(t,request(12,0)))
     r = s:cancel(); assert(r.status == 'cancelled' and s:cancel() == r and s:step({max_expansions=1}) == r)
+end)
+test('invalid slices terminate idempotently',function()
+    local t = fixtures.rectangle(-9,21,-9,9,0)
+    local s = assert(planner.new(t,request(12,0)))
+    local r = s:step({max_expansions=0})
+    assert(r.status == 'failed' and r.error.code == 'invalid_config')
+    assert(s:step({max_expansions=1}) == r and s:cancel() == r)
+end)
+
+local function graph_edges(graph)
+    local ds={{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1}}
+    return {evaluate=function(_,_,s,h)
+        local k=s.i..':'..s.j..':'..(s.heading == nil and 's' or s.heading)
+        local c=graph[k] and graph[k][h]
+        if not c then return {ok=false,code='outside'} end
+        local d=ds[h+1]
+        return {ok=true,cost=c,next_state={i=s.i+d[1],j=s.j+d[2],heading=h},
+            metrics={length=c,ascent=0,descent=0,grade=0,turn_count=0,cut_count=0,fill_count=0}}
+    end}
+end
+test('equal f and heuristic priorities use insertion order',function()
+    local t=fixtures.rectangle(-5,17,-9,9,0)
+    local diagonal=math.sqrt(32)
+    assert(planner.set_edges(graph_edges({['0:0:s']={[1]=diagonal,[7]=diagonal},
+        ['1:1:1']={[0]=4},['1:-1:7']={[0]=4},
+        ['2:1:0']={[7]=diagonal},['2:-1:0']={[1]=diagonal}})))
+    local r=run(assert(planner.new(t,request(12,0))),1)
+    assert(r.status == 'succeeded' and r.route.headings[1] == 1
+        and r.route.headings[2] == 0 and r.route.headings[3] == 7)
+    assert(r.route.centerline[2].x == 4 and r.route.centerline[2].z == 4)
+    assert(planner.set_edges(edges))
+end)
+test('arrivals with different headings retain different continuations',function()
+    local t=fixtures.rectangle(-5,13,-5,13,0)
+    assert(planner.set_edges(graph_edges({['0:0:s']={[0]=4,[1]=math.sqrt(32)},
+        ['1:0:0']={[1]=6},['1:1:1']={[0]=4},['2:1:1']={[2]=4}})))
+    local r=run(assert(planner.new(t,request(8,8))),1)
+    assert(r.status == 'succeeded' and #r.route.headings == 3)
+    assert(r.route.headings[1] == 0 and r.route.headings[2] == 1 and r.route.headings[3] == 2)
+    assert(planner.set_edges(edges))
 end)
 
 -- A finite directed graph provides a separate Dijkstra oracle, while retaining

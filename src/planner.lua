@@ -106,7 +106,7 @@ function planner.new(terrain, request, config)
         or math.abs(ground_b.y-b.y) > 2 then
         return nil, failure('invalid_endpoint', 'endpoints must be distinct, aligned, and within range')
     end
-    for _,p in ipairs({a,b}) do
+    for _,p in ipairs({a,b,request.provenance.start.ground,request.provenance.goal.ground}) do
         local ok,c = pcall(terrain.get_column,p.x,p.z)
         if not ok or type(c) ~= 'table' or c.status ~= 'ok' or c.ground_y ~= p.y then
             return nil, failure('invalid_endpoint', 'endpoint does not match surveyed ground', {position=copy(p)})
@@ -160,7 +160,7 @@ function planner.new(terrain, request, config)
         if self.terminal then return self.terminal end
         if type(slice) ~= 'table' or not integer(slice.max_expansions) or slice.max_expansions < 1
             or (slice.deadline ~= nil and (not finite(slice.deadline) or type(clock) ~= 'function')) then
-            return {status='failed',metrics=copy(self.metrics),error=failure('invalid_config','invalid search slice')}
+            return finish('failed',failure('invalid_config','invalid search slice'))
         end
         local used = 0
         local function expired() return slice.deadline ~= nil and clock() >= slice.deadline end
