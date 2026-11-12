@@ -284,6 +284,19 @@ caps above, write cap 50,000). Survey owns preflight coverage/allocation checks;
 planner owns search limits; composition/build own write limits. Pure modules
 accept config explicitly. Callers cannot silently relax shared geometry limits.
 
+Survey configuration supplies `dimension_bounds` as the true usable overworld
+(inclusive X/Y/Z) and `safe_generation_bounds={min_y,max_y}` as an independently
+established inclusive interval excluding other realms and their barriers. The
+VoxeLibre adapter derives the latter from authoritative world definitions and
+fails closed when unavailable. Both endpoint ground heights must lie inside the
+true dimension. Surface selection must also respect those true Y bounds.
+Padding may extend beyond the true overworld into the safe interval. Complete
+chunk coverage must stay within the true X/Z bounds, hard map limits, the safe
+generation interval, and the true Y bounds padded by 48 and rounded outward to
+chunks (with that envelope intersected with the map limits). This permits, for
+example, a normal low overworld surface without permitting End terrain as a
+destination or generation across a realm boundary.
+
 The jobs module owns one global slot from accepted `/roads_plan` until cancel,
 failure, disconnect, or completion of build. A **ready plan retains that slot**
 and its owner; another request receives `busy`. The owner can preview, build, or
