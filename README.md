@@ -45,7 +45,8 @@ rollback; use a disposable world while playtesting.
 
 `mod.conf` declares the mod and dependencies; `init.lua` wires the Luanti
 adapters to the pure Lua planning modules under `src/`. Run the unit suite with
-`lua5.1 tests/run.lua`.
+`lua5.1 tests/run.lua`. GitHub Actions runs the same suite for pull requests and
+pushes to `main`.
 
 ## License
 
