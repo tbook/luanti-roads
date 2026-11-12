@@ -5,9 +5,10 @@ connections between Towns and Living Villages settlements.
 
 ## Status
 
-This repository currently contains a loadable mod skeleton and a proposed
-engineering design. Route planning, commands, and road construction are not yet
-implemented. Loading the mod does not modify terrain or generate roads.
+This repository contains an early route planner for VoxeLibre. Server-privileged
+players can select two endpoints and request a terrain survey and route plan.
+Planning may generate terrain in a bounded region. It does not place road blocks;
+construction and preview commands are not implemented.
 
 The first milestone will survey a bounded region between two manually selected
 endpoints, find a route balancing distance, slope, turns, and earthworks, and
@@ -21,15 +22,22 @@ and settlement integration are later extensions.
 
 Place this repository in a directory named `roads` under Luanti's `mods`
 directory, or in a world's `worldmods` directory. Enable `roads` in a VoxeLibre
-world. The skeleton requires VoxeLibre's `mcl_core` mod; Towns and Living Villages
-are not required.
+world. The mod depends on VoxeLibre's `mcl_core` and `mcl_init`; Towns and Living
+Villages are not required.
+
+## Commands
+
+All commands require the server privilege. Use `/roads_start` at the first
+endpoint, travel to the destination, then use `/roads_plan`. Check progress and
+the resolved endpoints with `/roads_status`; `/roads_cancel` cancels active
+work or releases a completed, unbuilt plan. Only one survey or ready plan can
+hold the server slot at a time. A ready plan does not build anything.
 
 ## Development
 
-`mod.conf` declares the mod and dependencies; `init.lua` is the entry point.
-Implementation modules will be added under `src/` as the planner is developed.
-The design specifies a pure Lua planner and synthetic terrain fixtures before
-real-world surveying and construction are introduced.
+`mod.conf` declares the mod and dependencies; `init.lua` wires the Luanti
+adapters to the pure Lua planning modules under `src/`. Run the unit suite with
+`lua5.1 tests/run.lua`.
 
 ## License
 

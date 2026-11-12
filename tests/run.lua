@@ -290,3 +290,4 @@ dofile("tests/surface.lua")
 dofile("tests/survey.lua")
 
 dofile("tests/survey_job.lua")
+dofile("tests/jobs.lua")
