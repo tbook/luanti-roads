@@ -49,7 +49,7 @@ function jobs.new(ops)
         -- plan. Never retain the survey snapshot or A* state graph in reports.
         record.survey=nil; record.search=nil; record.terrain=nil; record.route=nil
         record.config=nil
-        if status~="ready" then record.plan=nil end
+        if status~="ready" and status~="built" then record.plan=nil end
         self.reports[record.owner]=record
         publish(record)
     end
@@ -166,6 +166,22 @@ function jobs.new(ops)
         if record.owner~=owner then return nil,error_result("not_owner","only the planning player can cancel this job") end
         finish(record,"cancelled",error_result("cancelled","planning cancelled by owner"))
         return true
+    end
+
+    function self:preview_route(owner)
+        local record=self.active and self.active.owner==owner and self.active or self.reports[owner]
+        if self.active and self.active.owner~=owner and self.active.state=="ready" then
+            return nil,error_result("not_owner","only the plan owner can preview it")
+        end
+        if not record then return nil,error_result("no_plan","there is no road plan to preview") end
+        if record.owner~=owner then return nil,error_result("not_owner","only the plan owner can preview it") end
+        if record.state~="ready" and record.state~="built" then
+            return nil,error_result("plan_unavailable","the road plan is not ready to preview")
+        end
+        if type(record.plan)~="table" or type(record.plan.centerline)~="table" then
+            return nil,error_result("plan_unavailable","the route geometry is unavailable")
+        end
+        return copy(record.plan.centerline)
     end
 
     function self:disconnect(owner)

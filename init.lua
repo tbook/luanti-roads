@@ -13,6 +13,7 @@ local survey_job=load("src/survey_job.lua")
 local voxelibre=load("src/voxelibre.lua")
 local lifecycle=load("src/jobs.lua")
 local commands=load("src/commands.lua")
+local preview=load("src/preview.lua")
 
 assert(edges.set_raster(raster))
 assert(planner.set_edges(edges))
@@ -53,9 +54,12 @@ local ops={now=now,after=function(delay,fn) core.after(delay,fn) end,
 }
 local controller,err=lifecycle.new(ops)
 if not controller then error("[roads] cannot initialize job lifecycle: "..tostring(err.reason)) end
-assert(commands.register(core,controller,surface,world_config))
+local preview_renderer,preview_error=preview.new(core,function() return core.get_us_time()/1000000 end)
+if not preview_renderer then error("[roads] cannot initialize route preview: "..tostring(preview_error.reason)) end
+assert(commands.register(core,controller,surface,world_config,preview_renderer))
 core.register_on_leaveplayer(function(player)
     local name=player:get_player_name()
     controller:disconnect(name)
+    preview_renderer:forget(name)
 end)
 core.log("action","[roads] route planning commands registered; surveys can generate terrain")

@@ -34,7 +34,7 @@ local function summary(status)
     return table.concat(lines," ")
 end
 
-function commands.register(engine,controller,surface,world_config)
+function commands.register(engine,controller,surface,world_config,preview_renderer)
     if type(engine)~="table" or type(engine.register_chatcommand)~="function"
         or type(controller)~="table" or type(surface)~="table"
         or type(surface.player_feet)~="function" or type(world_config)~="function" then
@@ -72,6 +72,16 @@ function commands.register(engine,controller,surface,world_config)
         if not ok then return false,err.reason end
         return true,"Road planning cancelled and its server slot released."
     end)
+    if preview_renderer then
+        register("roads_preview","Show your route as a temporary particle preview",function(name)
+            if not engine.get_player_by_name(name) then return false,"This command requires an online player." end
+            local route,why=controller:preview_route(name)
+            if not route then return false,why.reason end
+            local count,preview_error=preview_renderer:show(name,route)
+            if not count then return false,preview_error.reason end
+            return true,string.format("Showing %d temporary route markers for 8 seconds.",count)
+        end)
+    end
     return true
 end
 
