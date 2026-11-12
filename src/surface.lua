@@ -25,7 +25,7 @@ allow("replaceable", {"mcl_flowers:tallgrass", "mcl_flowers:fern",
     "mcl_flowers:tulip_orange", "mcl_flowers:tulip_pink", "mcl_flowers:tulip_red",
     "mcl_flowers:tulip_white", "mcl_flowers:allium", "mcl_flowers:azure_bluet",
     "mcl_flowers:blue_orchid", "mcl_flowers:lily_of_the_valley", "mcl_flowers:cornflower",
-    "mcl_core:vine", "mcl_mushrooms:mushroom_brown", "mcl_mushrooms:mushroom_red"})
+    "mcl_core:vine", "mcl_core:snow", "mcl_mushrooms:mushroom_brown", "mcl_mushrooms:mushroom_red"})
 allow("water", {"mcl_core:water_source", "mcl_core:water_flowing"})
 classes.air = "air"
 
