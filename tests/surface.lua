@@ -92,6 +92,18 @@ test("ordinary flowers allow routing but retain metadata and protection", functi
     assert(surface.classify({name="mcl_core:tree"},false).kind=="obstacle")
     assert(surface.classify({name="mcl_flowerpots:flower_pot"},false).kind=="obstacle")
 end)
+test("thin snow permits endpoint selection while retaining metadata and protection", function()
+    reset(); set(0,0,"mcl_core:dirt_with_grass_snow"); set(0,1,"mcl_core:snow")
+    set(1,1,"mcl_core:snow"); metadata["1:1:0"]=true
+    set(2,1,"mcl_core:snow"); protection["2:1:0"]=true
+    set(3,1,"mcl_core:snow_2")
+    local s=snap()
+    assert(s.get_column(0,0).status=="ok" and s.get_column(0,0).band[1].kind=="replaceable")
+    assert(surface.endpoints(s,{x=0,y=.5,z=0},{x=5,y=.5,z=0}))
+    assert(s.get_column(1,0).status=="structure")
+    assert(s.get_column(2,0).band[1].protected)
+    assert(s.get_column(3,0).status=="structure")
+end)
 test("natural decorations and exposed ores retain their protections", function()
     reset(); set(0,1,"mcl_core:vine"); set(1,1,"mcl_mushrooms:mushroom_brown")
     set(2,1,"mcl_mushrooms:mushroom_red"); set(3,0,"mcl_core:stone_with_coal")
