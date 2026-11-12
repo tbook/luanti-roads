@@ -13,6 +13,7 @@ local function fixture()
     end}
     local ops={actions=actions,access={},now=function() return time end,
         after=function(delay,fn) queue[#queue+1]={at=time+delay,fn=fn} end,
+        load_area=function() end,
         emerge=function(a,b,cb) requests[#requests+1]=cb end}
     local function run()
         table.sort(queue,function(a,b) return a.at<b.at end)
@@ -21,9 +22,10 @@ local function fixture()
     local function callbacks(cb,action,skip)
         for i=0,124 do if i~=skip then cb({x=i%5-2,y=math.floor(i/5)%5-2,z=math.floor(i/25)-2},action or actions.memory,124-i) end end
     end
-    local job=assert(service.new(pre,inspector,ops,{},{},"alice",{}))
+    local config={dimension_bounds={min_y=-1,max_y=3}}
+    local job=assert(service.new(pre,inspector,ops,{},{},"alice",config))
     return {job=job,run=run,requests=requests,callbacks=callbacks,actions=actions,
-        advance=function(n) time=time+n end,plan=plan,pre=pre,inspector=inspector,ops=ops}
+        advance=function(n) time=time+n end,plan=plan,pre=pre,inspector=inspector,ops=ops,config=config}
 end
 local function complete(f)
     f.run(); assert(#f.requests==1); f.callbacks(f.requests[1]); f.run()
@@ -53,9 +55,30 @@ test("timeout and cancellation invalidate late callbacks",function()
 end)
 test("caps and inspection failure",function()
     local f=fixture(); f.plan.patches[1].voxel_count=2000001
-    local j,e=service.new(f.pre,f.inspector,f.ops,{},{},"alice",{}); assert(not j and e.code=="survey_budget")
+    local j,e=service.new(f.pre,f.inspector,f.ops,{},{},"alice",f.config); assert(not j and e.code=="survey_budget")
     f=fixture(); f.inspector.inspect=function() error("broken") end
     f.run(); f.callbacks(f.requests[1]); f.run(); f.callbacks(f.requests[2]); f.run(); f.run()
     assert(f.job:status().error.code=="survey_failed")
+end)
+test("evicted blocks are reloaded within tile bounds before each inspection",function()
+    local f=fixture(); local loaded,loads=false,0
+    f.ops.load_area=function(a,b)
+        assert(a.y==-6 and b.y==8 and b.x-a.x<=3 and b.z-a.z<=3)
+        loaded=true; loads=loads+1
+    end
+    f.inspector.inspect=function()
+        assert(loaded, "evicted tile read before load"); loaded=false
+        return {get_column=function() return {status="ok",ground_y=0} end}
+    end
+    complete(f); local s=f.job:status()
+    assert(s.status=="succeeded" and loads==9 and s.metrics.max_load_voxels==8192)
+end)
+test("load failure and out of overworld ground fail closed",function()
+    local f=fixture(); f.ops.load_area=function() error("disk unavailable") end
+    complete(f); assert(f.job:status().error.code=="survey_failed")
+    f=fixture(); f.inspector.inspect=function()
+        return {get_column=function() return {status="ok",ground_y=-2} end}
+    end
+    complete(f); assert(f.job:status().terrain.get_column(0,0).status=="unknown")
 end)
 print("ok - "..count.." asynchronous survey tests")

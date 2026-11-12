@@ -9,7 +9,8 @@ local function copy(t)
 end
 local function fail(code, reason) return nil, {code=code, reason=reason} end
 
--- ops: now() seconds, after(delay, fn), emerge(minp,maxp,cb), access,
+-- ops: now() seconds, after(delay, fn), emerge(minp,maxp,cb),
+-- load_area(minp,maxp) (load existing blocks only), access,
 -- actions={cancelled=...,errored=...,memory=...,disk=...,generated=...}.
 -- Each job is independent; callbacks and scheduled work are invalidated at
 -- termination. The caller owns global exclusion and starts/cancels jobs.
@@ -17,7 +18,7 @@ function service.new(preflight, inspector, ops, start, goal, owner, config)
     if type(preflight) ~= "table" or type(preflight.plan) ~= "function"
         or type(inspector) ~= "table" or type(inspector.inspect) ~= "function"
         or type(ops) ~= "table" or type(ops.now) ~= "function"
-        or type(ops.after) ~= "function" or type(ops.emerge) ~= "function"
+        or type(ops.after) ~= "function" or type(ops.emerge) ~= "function" or type(ops.load_area) ~= "function"
         or type(ops.actions) ~= "table" or type(ops.access) ~= "table"
         or type(owner) ~= "string" then return fail("invalid_config", "missing survey dependencies") end
     local actions=ops.actions
@@ -29,6 +30,11 @@ function service.new(preflight, inspector, ops, start, goal, owner, config)
     end
     local plan,err=preflight.plan(start,goal,config)
     if not plan then return nil,err end
+    local dimension=type(config) == "table" and config.dimension_bounds
+    if type(dimension) ~= "table" or type(dimension.min_y) ~= "number" or type(dimension.max_y) ~= "number"
+        or dimension.min_y ~= math.floor(dimension.min_y) or dimension.max_y ~= math.floor(dimension.max_y)
+        or dimension.min_y > dimension.max_y then return fail("invalid_config", "missing overworld ground limits") end
+    local ground_min,ground_max=dimension.min_y,dimension.max_y
     if #plan.patches > 96 or plan.chunk_count ~= #plan.patches then return fail("survey_budget", "invalid chunk count") end
     for _,p in ipairs(plan.patches) do
         if not p.voxel_count or p.voxel_count > 2000000 then return fail("survey_budget", "patch allocation exceeds limit") end
@@ -37,7 +43,7 @@ function service.new(preflight, inspector, ops, start, goal, owner, config)
     local state={status="running", metrics={chunks_total=#plan.patches,chunks_completed=0,
         callbacks=0, tiles_completed=0, columns_completed=0, emerge_wait_seconds=0,
         inspection_seconds=0, max_inspection_seconds=0, max_patch_voxels=0,
-        max_emerge_voxels=0}}
+        max_emerge_voxels=0,load_seconds=0,max_load_voxels=0}}
     local started=ops.now()
     local last_progress=started
     local columns={}
@@ -70,6 +76,16 @@ function service.new(preflight, inspector, ops, start, goal, owner, config)
         local volume=(tile.max_x-tile.min_x+1)*(tile.max_z-tile.min_z+1)*(tile.max_y-tile.min_y+1)
         if volume > 2000000 then finish("survey_budget", "inspection allocation exceeds limit"); return end
         local begin=ops.now()
+        -- load_area loads existing mapblocks only. Account for the rounded
+        -- blocks, not just the smaller node rectangle passed to the API.
+        local function block_span(lo,hi) return (math.floor(hi/16)-math.floor(lo/16)+1)*16 end
+        local load_volume=block_span(tile.min_x,tile.max_x)*block_span(tile.min_y,tile.max_y)*block_span(tile.min_z,tile.max_z)
+        if load_volume > 2000000 then finish("survey_budget", "tile load exceeds allocation limit"); return end
+        local loaded,load_result=pcall(ops.load_area,{x=tile.min_x,y=tile.min_y,z=tile.min_z},
+            {x=tile.max_x,y=tile.max_y,z=tile.max_z})
+        state.metrics.load_seconds=state.metrics.load_seconds+math.max(0,ops.now()-begin)
+        state.metrics.max_load_voxels=math.max(state.metrics.max_load_voxels,load_volume)
+        if not loaded or load_result == false then finish("survey_failed", "tile load failed: "..tostring(load_result)); return end
         local ok,result,why=pcall(inspector.inspect,tile,owner,ops.access)
         state.metrics.max_patch_voxels=math.max(state.metrics.max_patch_voxels,volume)
         if not ok or not result then finish("survey_failed", "surface inspection failed: "..tostring(ok and why and why.reason or result)); return end
@@ -77,6 +93,9 @@ function service.new(preflight, inspector, ops, start, goal, owner, config)
             for x=tile.min_x,tile.max_x do for z=tile.min_z,tile.max_z do
                 local col=result.get_column(x,z)
                 if type(col) ~= "table" then error("missing inspected column") end
+                if col.status == "ok" and (type(col.ground_y) ~= "number" or col.ground_y < ground_min or col.ground_y > ground_max) then
+                    col={status="unknown",reason="surface outside overworld"}
+                end
                 columns[key(x,z)]=copy(col); state.metrics.columns_completed=state.metrics.columns_completed+1
             end end
         end)
