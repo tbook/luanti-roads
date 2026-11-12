@@ -30,9 +30,9 @@ Villages are not required.
 All commands require the server privilege. Use `/roads_start` at the first
 endpoint, travel to the destination, then use `/roads_plan`. Check progress and
 the resolved endpoints with `/roads_status`; `/roads_cancel` cancels active
-work or releases a completed, unbuilt plan. `/roads_preview` briefly shows the
-ready route to its owner as temporary particles. Preview requests are limited
-to one every eight seconds and markers expire after eight seconds. Only one
+work or releases a completed, unbuilt plan. `/roads_preview` shows bright
+markers above the route to its owner for 30 seconds. Preview requests are limited
+to one every eight seconds. Only one
 survey or ready plan can hold the server slot at a time. A ready plan does not
 build anything.
 

@@ -2,6 +2,10 @@
 -- Sequential emerge, then small full-height read-only inspection tiles.
 local service = {}
 local TILE = 4
+-- Bound each server callback by both elapsed time and a hard tile count. A
+-- single slow tile cannot be interrupted, so check the clock between tiles.
+local SLICE_SECONDS = 0.010
+local SLICE_TILES = 8
 local TIMEOUT = 60
 local function copy(t)
     if type(t) ~= "table" then return t end
@@ -67,7 +71,7 @@ function service.new(preflight, inspector, ops, start, goal, owner, config)
     local function monitor()
         if check_timeout() then schedule(1,monitor) end
     end
-    local inspect_next,emerge_next
+    local inspect_next,inspect_slice,emerge_next
     local function key(x,z) return x..":"..z end
     inspect_next=function()
         if not check_timeout() then return end
@@ -115,12 +119,21 @@ function service.new(preflight, inspector, ops, start, goal, owner, config)
                 return copy(saved[key(x,z)] or {status="unknown",reason="missing column"})
             end}
             state.status="succeeded"; state.metrics.total_seconds=ops.now()-started; request_id=request_id+1
-        else schedule(0,inspect_next) end
+        end
+    end
+    inspect_slice=function()
+        local deadline=ops.now()+SLICE_SECONDS
+        for _=1,SLICE_TILES do
+            inspect_next()
+            if state.status ~= "running" then return end
+            if ops.now() >= deadline then break end
+        end
+        schedule(0,inspect_slice)
     end
     emerge_next=function()
         if not check_timeout() then return end
         current=current+1
-        if current>#plan.patches then schedule(0,inspect_next); return end
+        if current>#plan.patches then schedule(0,inspect_slice); return end
         local p=plan.patches[current].request_bounds
         state.metrics.max_emerge_voxels=math.max(state.metrics.max_emerge_voxels,plan.patches[current].voxel_count)
         request_id=request_id+1; local id=request_id

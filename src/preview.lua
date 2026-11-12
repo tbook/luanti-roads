@@ -4,7 +4,7 @@ local preview={}
 local MAX_CENTERLINE=100000
 local MAX_PARTICLES=96
 local SPACING=2.5
-local EXPIRY=8
+local EXPIRY=30
 local RATE_LIMIT=8
 local COORD_LIMIT=31000
 
@@ -81,8 +81,10 @@ function preview.new(engine,now)
         for _,pos in ipairs(points) do
             local ok,why=pcall(engine.add_particle,{
                 pos=pos,velocity={x=0,y=0,z=0},acceleration={x=0,y=0,z=0},
-                expirationtime=EXPIRY,size=0.55,collisiondetection=false,
-                texture="default_cobble.png^[opacity:200",playername=owner,
+                -- Particle sizes use engine units: 10 units span one node.
+                -- A large glowing marker is visible against varied terrain.
+                expirationtime=EXPIRY,size=8,glow=14,collisiondetection=false,
+                texture="roads_preview.png",playername=owner,
             })
             if not ok then return nil,{code="preview_failed",reason="could not create route preview: "..tostring(why)} end
         end

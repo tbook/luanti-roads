@@ -56,8 +56,8 @@ function jobs.new(ops)
     local function current(record)
         return self.active==record and not record.closed
     end
-    local function later(record,fn)
-        local ok,err=pcall(ops.after,0.1,function()
+    local function later(record,fn,delay)
+        local ok,err=pcall(ops.after,delay or 0.1,function()
             if current(record) then fn() end
         end)
         if not ok then finish(record,"failed",error_result("survey_failed","cannot schedule planning job: "..tostring(err))) end
@@ -92,7 +92,9 @@ function jobs.new(ops)
             finish(record,"failed",error_result("invalid_config","planner step failed: "..tostring(result))); return
         end
         record.search_metrics=copy(result.metrics)
-        if result.status=="running" then later(record,function() tick_search(record) end); return end
+        -- Luanti's after(0) callbacks run on the next server step, not in a
+        -- synchronous loop. Keep the 5 ms search budget on every step.
+        if result.status=="running" then later(record,function() tick_search(record) end,0); return end
         if result.status~="succeeded" then
             finish(record,result.status=="cancelled" and "cancelled" or "failed",
                 result.error or error_result("bounded_no_route","planner did not produce a route")); return

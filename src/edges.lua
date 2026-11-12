@@ -174,6 +174,49 @@ local function validate_columns(terrain, columns, counts, road_material)
     return nil
 end
 
+-- Reject a destination before A* only when its complete 3-by-3 cap cannot be
+-- rendered for any incoming heading or any grade-compatible predecessor
+-- elevation. This deliberately errs toward searching: it does not apply the
+-- preceding segment's body constraints or guess which approach the route uses.
+function edges.check_goal_cap(terrain, goal, config)
+    if not raster then return nil, fail("invalid_config", "raster dependency has not been injected") end
+    local failures = {}
+    local directions = {{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1}}
+    for _, direction in ipairs(directions) do
+        for previous_y = goal.y - 1, goal.y + 1 do
+            local previous = {x=goal.x-4*direction[1], y=previous_y, z=goal.z-4*direction[2]}
+            local cap, err = raster.segment(previous, goal)
+            if cap then
+                local columns = {}
+                for _, p in ipairs(cap.columns) do
+                    if math.abs(p.x-goal.x) <= 1 and math.abs(p.z-goal.z) <= 1 then
+                        columns[#columns+1] = p
+                    end
+                end
+                local issue, reason, position = validate_columns(terrain, columns, nil,
+                    config and config.road_material)
+                if not issue then return true end
+                failures[issue] = failures[issue] or {reason=reason, position=position}
+            elseif err then
+                return nil, fail(err.code, err.reason, err.position)
+            end
+        end
+    end
+    local names = {"water", "structure", "protected", "unknown", "support", "clearance", "earthwork"}
+    local causes = {}
+    for _, name in ipairs(names) do if failures[name] then causes[#causes+1]=name end end
+    for name in pairs(failures) do
+        local known=false; for _, listed in ipairs(names) do if name==listed then known=true end end
+        if not known then causes[#causes+1]=name end
+    end
+    table.sort(causes)
+    local detail = #causes > 0 and table.concat(causes, ", ") or "no feasible cap profile"
+    local first = failures[causes[1]]
+    return nil, fail("blocked_destination",
+        string.format("Destination at (%d, %d, %d) has no clear 3-by-3 road cap; observed blockers: %s",
+            goal.x, goal.y, goal.z, detail), first and first.position or goal)
+end
+
 local function world_point(terrain, x, z)
     local column, code, reason = terrain_column(terrain, x, z)
     if not column then return nil, code, reason end

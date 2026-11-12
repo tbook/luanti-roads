@@ -82,7 +82,9 @@ test("renderer targets owner, expires particles, and enforces per-player rate ca
     assert(n==#emitted and n<=preview.MAX_PARTICLES)
     for _,p in ipairs(emitted) do
         assert(p.playername=="alice" and p.expirationtime==preview.EXPIRY)
-        assert(p.texture=="default_cobble.png^[opacity:200" and p.collisiondetection==false)
+        assert(p.texture=="roads_preview.png" and p.collisiondetection==false)
+        assert(p.size>=8 and p.glow==14 and p.expirationtime>=30,
+            "markers should be conspicuous, lit, and last long enough to inspect")
     end
     local again,err=renderer:show("alice",line)
     assert(not again and err.code=="rate_limited" and #emitted==n)
@@ -91,6 +93,27 @@ test("renderer targets owner, expires particles, and enforces per-player rate ca
     assert(renderer:show("alice",line))
     now=preview.RATE_LIMIT
     assert(renderer:show("alice",line))
+end)
+
+test("repeated previews stay bounded while older markers remain visible",function()
+    local now,active=0,{}
+    local engine={add_particle=function(def)
+        active[#active+1]={expires=now+def.expirationtime,owner=def.playername}
+    end}
+    local renderer=assert(preview.new(engine,function() return now end))
+    local line={}; for x=0,500 do line[#line+1]={x=x,y=0,z=0} end
+    for i=0,12 do
+        now=i*preview.RATE_LIMIT
+        local live={}
+        for _,p in ipairs(active) do if p.expires>now then live[#live+1]=p end end
+        active=live
+        assert(renderer:show("alice",line)==preview.MAX_PARTICLES)
+        assert(#active<=preview.MAX_PARTICLES*math.ceil(preview.EXPIRY/preview.RATE_LIMIT))
+        for _,p in ipairs(active) do assert(p.owner=="alice") end
+    end
+    local texture=assert(io.open("textures/roads_preview.png","rb"))
+    assert(texture:read(8)=="\137PNG\r\n\26\n")
+    texture:close()
 end)
 
 print("ok - "..count.." route preview tests")

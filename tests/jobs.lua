@@ -53,7 +53,8 @@ local function harness(options)
             h.request=request; h.planner_config=config
             if options.planner_start_error then return nil,{code="invalid_endpoint",reason="planner refused endpoint"} end
             local search={calls=0,cancelled=false}
-            function search:step()
+            function search:step(budget,clock)
+                self.budget=budget; self.clock=clock
                 self.calls=self.calls+1
                 if options.search_error then return {status="failed",error={code="bounded_no_route",reason="barrier"},metrics={expansions=2,states=4}} end
                 if options.search_slices and self.calls < options.search_slices then return {status="running",metrics={expansions=self.calls*10,states=8}} end
@@ -98,6 +99,19 @@ test("per-player endpoint ownership and simultaneous requests",function()
     assert(h.survey_args.owner=="alice" and h.survey_args.start.x==0 and h.survey_args.goal.x==8)
     assert(h.controller:start_endpoint("alice",point(40,.5,0))) -- selection is independent of active job
     assert(h.survey_args.start.x==0)
+end)
+
+test("search yields to the next server step with its per-slice budget",function()
+    local h=harness({search_slices=3}); h.controller:start_endpoint("alice",point(0,.5,0))
+    assert(h.controller:plan("alice",point(8,.5,0),h.config))
+    assert(#h.queue==1 and h.queue[1].at==0.1) -- survey polling is unchanged
+    h.survey.state="succeeded"; h.drain(1)
+    assert(h.search.calls==1 and h.search.budget.max_expansions==1000)
+    assert(h.search.budget.deadline==h.time+0.005 and h.search.clock()==h.time)
+    assert(#h.queue==1 and h.queue[1].at==h.time) -- zero-delay, still asynchronous
+    h.drain(1); assert(h.search.calls==2 and h.controller:status("alice").state=="searching")
+    assert(h.controller:cancel("alice") and h.search.cancelled)
+    h.drain(1); assert(h.search.calls==2 and h.composed==0)
 end)
 
 test("survey, resumable search, composition, ready ownership, and release",function()
@@ -213,6 +227,16 @@ test("public commands require server privilege, warn about generation, and omit 
     assert(ok and message:find("cancelled",1,true))
 end)
 
+test("bounded no-route status lists three leading rejection counts deterministically",function()
+    local message=commands.summary({state="failed",error={code="bounded_no_route",reason="frontier exhausted"},
+        search_metrics={expansions=40,states=80,rejections={water=10,grade=10,unknown=7,structure=6,clearance=5}}})
+    assert(message:find("Most common rejected edges: grade 10, water 10, unknown 7.",1,true))
+    assert(not message:find("structure 6",1,true))
+    local other=commands.summary({state="failed",error={code="expansion_budget",reason="limit"},
+        search_metrics={expansions=40,states=80,rejections={water=10}}})
+    assert(other:find("Most common rejected edges: water 10.",1,true))
+end)
+
 test("preview command is privileged, owner-only, and displays an available ready plan",function()
     local h=harness(); local registered,particles={},{}
     local player={get_pos=function() return point(1,1.5,2) end,
@@ -230,7 +254,7 @@ test("preview command is privileged, owner-only, and displays an available ready
     h.survey.state="succeeded"; h.drain()
     ok,message=registered.roads_preview.func("alice")
     assert(ok and message:find("temporary route markers",1,true) and #particles>=2)
-    assert(particles[1].playername=="alice" and particles[1].expirationtime==8)
+    assert(particles[1].playername=="alice" and particles[1].expirationtime==30)
     local count=#particles
     ok,message=registered.roads_preview.func("alice")
     assert(not ok and message:find("wait",1,true) and #particles==count)
