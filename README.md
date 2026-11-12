@@ -8,7 +8,7 @@ connections between Towns and Living Villages settlements.
 This repository contains an early route planner for VoxeLibre. Server-privileged
 players can select two endpoints and request a terrain survey and route plan.
 Planning may generate terrain in a bounded region. It does not place road blocks;
-construction and preview commands are not implemented.
+construction is not implemented.
 
 The first milestone will survey a bounded region between two manually selected
 endpoints, find a route balancing distance, slope, turns, and earthworks, and
@@ -30,8 +30,11 @@ Villages are not required.
 All commands require the server privilege. Use `/roads_start` at the first
 endpoint, travel to the destination, then use `/roads_plan`. Check progress and
 the resolved endpoints with `/roads_status`; `/roads_cancel` cancels active
-work or releases a completed, unbuilt plan. Only one survey or ready plan can
-hold the server slot at a time. A ready plan does not build anything.
+work or releases a completed, unbuilt plan. `/roads_preview` briefly shows the
+ready route to its owner as temporary particles. Preview requests are limited
+to one every eight seconds and markers expire after eight seconds. Only one
+survey or ready plan can hold the server slot at a time. A ready plan does not
+build anything.
 
 ## Development
 

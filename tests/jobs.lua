@@ -3,6 +3,7 @@ local lifecycle=dofile("src/jobs.lua")
 local commands=dofile("src/commands.lua")
 local voxelibre=dofile("src/voxelibre.lua")
 local survey=dofile("src/survey.lua")
+local preview=dofile("src/preview.lua")
 local count=0
 local function test(name,fn)
     local ok,err=pcall(fn)
@@ -10,6 +11,12 @@ local function test(name,fn)
     count=count+1
 end
 local function point(x,y,z) return {x=x,y=y,z=z} end
+local function lattice_line(a,b)
+    local n=math.max(math.abs(b.x-a.x),math.abs(b.y-a.y),math.abs(b.z-a.z))
+    local line={}
+    for i=0,n do line[#line+1]={x=a.x+(b.x-a.x)*i/n,y=a.y+(b.y-a.y)*i/n,z=a.z+(b.z-a.z)*i/n} end
+    return line
+end
 local function endpoint(feet,resolved_x)
     local ground={x=math.floor(feet.x+0.5),y=math.floor(feet.y+0.5)-1,z=math.floor(feet.z+0.5)}
     local resolved={x=resolved_x or ground.x,y=ground.y,z=ground.z}
@@ -51,6 +58,7 @@ local function harness(options)
                 if options.search_error then return {status="failed",error={code="bounded_no_route",reason="barrier"},metrics={expansions=2,states=4}} end
                 if options.search_slices and self.calls < options.search_slices then return {status="running",metrics={expansions=self.calls*10,states=8}} end
                 return {status="succeeded",metrics={expansions=15,states=10},route={cost=27,
+                    centerline=lattice_line(request.start,request.goal),
                     metrics={length=24,ascent=0,descent=0,max_grade=0.1,turn_count=1,cut_count=2,fill_count=3}}}
             end
             function search:cancel() self.cancelled=true end
@@ -60,7 +68,7 @@ local function harness(options)
         compose=function(_,route,config)
             h.composed=h.composed+1; h.route=route; h.composition_config=config
             if options.compose_error then return nil,{code="composition_failed",reason="overlap"} end
-            return {owner="alice",writes={},metrics={length=route.metrics.length,max_grade=0.1,
+            return {owner="alice",writes={},centerline=route.centerline,metrics={length=route.metrics.length,max_grade=0.1,
                 cut_count=5,fill_count=6,road_count=200,write_count=300}}
         end}
     h.controller=assert(lifecycle.new(ops))
@@ -182,7 +190,7 @@ test("scheduler errors cancel in-flight services and compact terminal state",fun
     assert(r.search==nil and r.terrain==nil and r.route==nil and r.plan==nil and r.config==nil)
 end)
 
-test("public commands require server privilege, warn about generation, and omit build/preview",function()
+test("public commands require server privilege, warn about generation, and omit build",function()
     local h=harness(); local registered={}
     local player={get_pos=function() return point(1,1.5,2) end,
         get_properties=function() return {collisionbox={-0.3,-1,-.3,.3,1,.3}} end}
@@ -193,7 +201,7 @@ test("public commands require server privilege, warn about generation, and omit 
     for _,name in ipairs({"roads_start","roads_plan","roads_status","roads_cancel"}) do
         assert(registered[name] and registered[name].privs.server)
     end
-    assert(not registered.roads_build and not registered.roads_preview)
+    assert(not registered.roads_build)
     assert(registered.roads_plan.description:find("generate new terrain",1,true))
     local ok,message=registered.roads_start.func("alice")
     assert(ok and message:find("First endpoint",1,true))
@@ -203,6 +211,42 @@ test("public commands require server privilege, warn about generation, and omit 
     assert(ok and message:find("surveying",1,true))
     ok,message=registered.roads_cancel.func("alice")
     assert(ok and message:find("cancelled",1,true))
+end)
+
+test("preview command is privileged, owner-only, and displays an available ready plan",function()
+    local h=harness(); local registered,particles={},{}
+    local player={get_pos=function() return point(1,1.5,2) end,
+        get_properties=function() return {collisionbox={-0.3,-1,-.3,.3,1,.3}} end}
+    local engine={register_chatcommand=function(name,def) registered[name]=def end,
+        get_player_by_name=function(name) return name=="alice" and player or nil end,
+        add_particle=function(def) particles[#particles+1]=def end}
+    local surface={player_feet=function(p) return point(p:get_pos().x,p:get_pos().y-1,p:get_pos().z) end}
+    local renderer=assert(preview.new(engine,function() return h.time end))
+    assert(commands.register(engine,h.controller,surface,function() return h.config end,renderer))
+    assert(registered.roads_preview and registered.roads_preview.privs.server)
+    local ok,message=registered.roads_preview.func("alice")
+    assert(not ok and message:find("no road plan",1,true))
+    h.controller:start_endpoint("alice",point(0,.5,0)); h.controller:plan("alice",point(8,.5,0),h.config)
+    h.survey.state="succeeded"; h.drain()
+    ok,message=registered.roads_preview.func("alice")
+    assert(ok and message:find("temporary route markers",1,true) and #particles>=2)
+    assert(particles[1].playername=="alice" and particles[1].expirationtime==8)
+    local count=#particles
+    ok,message=registered.roads_preview.func("alice")
+    assert(not ok and message:find("wait",1,true) and #particles==count)
+    ok,message=registered.roads_preview.func("bob")
+    assert(not ok and message:find("online player",1,true))
+end)
+
+test("built owner plan remains previewable and other players cannot access its route",function()
+    local h=harness(); h.controller:start_endpoint("alice",point(0,.5,0))
+    h.controller:plan("alice",point(8,.5,0),h.config); h.survey.state="succeeded"; h.drain()
+    local line=assert(h.controller:preview_route("alice")); assert(#line>=2 and line[1].x==0 and line[#line].x==8)
+    local other,err=h.controller:preview_route("bob")
+    assert(not other and err.code=="not_owner")
+    h.controller.active.state="built"
+    h.controller.reports.alice=h.controller.active; h.controller.active=nil
+    assert(#assert(h.controller:preview_route("alice"))==#line)
 end)
 
 test("production VoxeLibre bounds reach survey service and permit padded flat-world survey",function()
