@@ -66,6 +66,13 @@ local function harness(options)
             h.searches[#h.searches+1]=search; h.search=search
             return search
         end,
+        start_build=function(plan,done)
+            h.build_done=done
+            local service={cancelled=false}
+            function service:cancel() self.cancelled=true end
+            h.builder=service
+            return service
+        end,
         compose=function(_,route,config)
             h.composed=h.composed+1; h.route=route; h.composition_config=config
             if options.compose_error then return nil,{code="composition_failed",reason="overlap"} end
@@ -204,7 +211,23 @@ test("scheduler errors cancel in-flight services and compact terminal state",fun
     assert(r.search==nil and r.terrain==nil and r.route==nil and r.plan==nil and r.config==nil)
 end)
 
-test("public commands require server privilege, warn about generation, and omit build",function()
+test("build lifecycle owns slot, rejects duplicates and retains terminal report",function()
+    local h=harness()
+    assert(h.controller:start_endpoint("alice",point(0,.5,0)))
+    assert(h.controller:plan("alice",point(8,.5,0),h.config))
+    h.survey.state="succeeded"; h.drain()
+    local ok,err=h.controller:build("bob"); assert(not ok and err.code=="not_owner")
+    assert(h.controller:build("alice"))
+    ok,err=h.controller:build("alice"); assert(not ok and err.code=="busy")
+    assert(h.controller:status("alice").state=="building")
+    h.build_done(nil,{writes=42,pause_seconds=.01})
+    assert(h.controller:status("alice").state=="built" and not h.controller.active)
+    assert(h.controller:status("alice").build_metrics.writes==42)
+    ok,err=h.controller:build("alice"); assert(not ok and err.code=="already_built")
+    assert(h.controller:preview_route("alice"))
+end)
+
+test("public commands require server privilege and warn about generation",function()
     local h=harness(); local registered={}
     local player={get_pos=function() return point(1,1.5,2) end,
         get_properties=function() return {collisionbox={-0.3,-1,-.3,.3,1,.3}} end}
@@ -212,10 +235,9 @@ test("public commands require server privilege, warn about generation, and omit 
         get_player_by_name=function() return player end}
     local surface={player_feet=function(p) return point(p:get_pos().x,p:get_pos().y-1,p:get_pos().z) end}
     assert(commands.register(engine,h.controller,surface,function() return h.config end))
-    for _,name in ipairs({"roads_start","roads_plan","roads_status","roads_cancel"}) do
+    for _,name in ipairs({"roads_start","roads_plan","roads_status","roads_cancel","roads_build"}) do
         assert(registered[name] and registered[name].privs.server)
     end
-    assert(not registered.roads_build)
     assert(registered.roads_plan.description:find("generate new terrain",1,true))
     local ok,message=registered.roads_start.func("alice")
     assert(ok and message:find("First endpoint",1,true))

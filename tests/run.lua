@@ -292,3 +292,5 @@ dofile("tests/survey.lua")
 dofile("tests/survey_job.lua")
 dofile("tests/jobs.lua")
 dofile("tests/preview.lua")
+
+dofile("tests/build.lua")

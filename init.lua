@@ -14,6 +14,7 @@ local voxelibre=load("src/voxelibre.lua")
 local lifecycle=load("src/jobs.lua")
 local commands=load("src/commands.lua")
 local preview=load("src/preview.lua")
+local build=load("src/build.lua")
 
 assert(edges.set_raster(raster))
 assert(planner.set_edges(edges))
@@ -51,6 +52,13 @@ local ops={now=now,after=function(delay,fn) core.after(delay,fn) end,
         return planner.new(terrain,request,planner_config)
     end,
     compose=function(terrain,route,config) return plans.compose(terrain,route,config) end,
+    start_build=function(plan,done)
+        return build.new(plan,{now=now,after=function(delay,fn) core.after(delay,fn) end,
+            load=function(minp,maxp) return core.load_area(minp,maxp) end,
+            access=access,classify=surface.classify,
+            has_timer=function(pos) return core.get_node_timer(pos):is_started() end,
+            write=function(pos,node) core.swap_node(pos,node) end},done)
+    end,
 }
 local controller,err=lifecycle.new(ops)
 if not controller then error("[roads] cannot initialize job lifecycle: "..tostring(err.reason)) end

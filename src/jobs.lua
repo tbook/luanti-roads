@@ -34,6 +34,7 @@ function jobs.new(ops)
     local function cancel_work(record)
         if record.survey and record.state=="surveying" then pcall(record.survey.cancel,record.survey) end
         if record.search and record.state=="searching" then pcall(record.search.cancel,record.search) end
+        if record.builder and record.state=="building" then pcall(record.builder.cancel,record.builder) end
     end
     local function finish(record,status,err,plan,request)
         if record.closed then return end
@@ -186,6 +187,30 @@ function jobs.new(ops)
         return copy(record.plan.centerline)
     end
 
+    function self:build(owner)
+        local record=self.active
+        if not record then
+            local prior=self.reports[owner]
+            if prior and prior.state=="built" then return nil,error_result("already_built","this road was already built") end
+            return nil,error_result("no_plan","there is no ready road plan")
+        end
+        if record.owner~=owner then return nil,error_result("not_owner","only the plan owner can build it") end
+        if record.state~="ready" then return nil,error_result("busy","the road job is not ready to build") end
+        if type(ops.start_build)~="function" then return nil,error_result("build_failed","construction is unavailable") end
+        record.state="building"
+        local ok,builder,err=pcall(ops.start_build,record.plan,function(build_error,metrics)
+            if not current(record) then return end
+            record.build_metrics=copy(metrics)
+            if build_error then finish(record,"failed",build_error)
+            else finish(record,"built",nil,record.plan) end
+        end)
+        if not ok then err=error_result("build_failed","construction startup failed: "..tostring(builder)); builder=nil end
+        if not builder then finish(record,"failed",err or error_result("build_failed","construction could not start")); return nil,record.error end
+        record.builder=builder
+        publish(record)
+        return true
+    end
+
     function self:disconnect(owner)
         local record=self.active
         if record and record.owner==owner then
@@ -205,7 +230,7 @@ function jobs.new(ops)
             error=copy(record.error),started_at=record.started_at,finished_at=record.finished_at,
             endpoints=copy(record.endpoints),request=copy(record.request),
             requested_endpoints={start=copy(record.start_feet),goal=copy(record.goal_feet)},
-            survey_metrics=copy(record.survey_metrics),search_metrics=copy(record.search_metrics)}
+            survey_metrics=copy(record.survey_metrics),search_metrics=copy(record.search_metrics),build_metrics=copy(record.build_metrics)}
         if record.route_summary then result.metrics=copy(record.route_summary.metrics); result.cost=record.route_summary.cost end
         return result
     end

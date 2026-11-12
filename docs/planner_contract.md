@@ -246,6 +246,8 @@ construction, reread this footprint with the same adapter and compare these
 semantic expectations, then rerun feasibility and protection before any write.
 Any mismatch makes the plan stale. Runtime node metadata must still be rejected,
 even if the underlying node name is a natural material.
+Plans that introduce connector semantics must increment the plan version so an
+older builder fails closed instead of applying unfamiliar geometry.
 
 Resolve road material to the adapter's cobblestone, fill to the specified natural
 material, and air to air. Identical writes deduplicate; different material or
