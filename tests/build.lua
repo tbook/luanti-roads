@@ -21,6 +21,45 @@ local function scenario(change)
 end
 local result,metrics,writes=scenario()
 assert(result=='success' and metrics.writes==2 and writes[1].node.name=='mcl_core:cobble')
+-- Snow melted after the survey: the support remains solid and the planned
+-- clear is still performed, even if its snow node is already gone.
+local function snow_scenario(change)
+    return scenario(function(plan,ops,w)
+        plan.expectations[1].material='mcl_core:dirt_with_grass_snow'
+        plan.expectations[2].material='mcl_core:dirt_with_grass_snow'
+        plan.expectations[3].kind='replaceable'
+        plan.expectations[3].material='mcl_core:snow'
+        ops.access.get_node=function(p)
+            return {name=p.y<1 and 'mcl_core:dirt_with_grass' or 'air'}
+        end
+        if change then change(plan,ops,w) end
+    end)
+end
+result,metrics,writes=snow_scenario()
+assert(result=='success' and metrics.writes==2 and writes[2].node.name=='air')
+for _,change in ipairs({
+    function(_,ops) ops.access.is_protected=function() return true end end,
+    function(_,ops) ops.access.has_metadata=function() return true end end,
+    function(_,ops) ops.has_timer=function() return true end end,
+    function(plan) plan.writes[2]=nil end, -- never accept occupied headroom without a clear
+    function(_,ops) ops.access.get_node=function(p)
+        return {name=p.y<1 and 'mcl_core:dirt_with_grass' or 'mcl_flowers:poppy'}
+    end end,
+}) do
+    local stale,_,performed=snow_scenario(change)
+    assert(stale.code=='stale_plan' and #performed==0)
+end
+local reverse,_,performed=scenario(function(plan,ops)
+    plan.expectations[1].material='mcl_core:dirt_with_grass'
+    ops.access.get_node=function(p) return {name=p.y==-1 and 'mcl_core:dirt_with_grass_snow'
+        or p.y==0 and 'mcl_core:dirt' or 'air'} end
+end)
+assert(reverse.code=='stale_plan' and #performed==0)
+local occupied,_,none=scenario(function(_,ops)
+    ops.access.get_node=function(p) return {name=p.y==-1 and 'mcl_core:stone'
+        or p.y==0 and 'mcl_core:dirt' or 'mcl_core:snow'} end
+end)
+assert(occupied.code=='stale_plan' and #none==0)
 for _,change in ipairs({
     function(_,ops) ops.access.get_node=function() return nil end end,
     function(_,ops) ops.access.has_metadata=function() return true end end,

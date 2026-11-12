@@ -35,6 +35,12 @@ function build.new(plan,ops,done)
     local function finish(err,metrics) if not self.cancelled then done(err,metrics) end end
     local function final()
         local started=ops.now()
+        -- Snow can melt while a long search runs. A planned clear already
+        -- removes the snow, so its disappearance has the same outcome.
+        local clears={}
+        for _,p in ipairs(plan.writes) do
+            if p.kind=='air' then clears[p.x..':'..p.y..':'..p.z]=true end
+        end
         for _,p in ipairs(plan.expectations) do
             local node=ops.access.get_node(p)
             local meta=node and ops.access.has_metadata(p)
@@ -43,7 +49,12 @@ function build.new(plan,ops,done)
                 return finish(fail('stale_plan','a node timer is active in the construction footprint'))
             end
             local protected=ops.access.is_protected(p,plan.owner)
-            if entry.kind~=p.kind or entry.material~=p.material or protected~=p.protected then
+            local melted_snow=p.kind=='replaceable' and p.material=='mcl_core:snow'
+                and entry.kind=='air' and clears[p.x..':'..p.y..':'..p.z]
+            local grass_changed=p.kind=='natural' and entry.kind=='natural'
+                and p.material=='mcl_core:dirt_with_grass_snow' and entry.material=='mcl_core:dirt_with_grass'
+            if (not melted_snow and not grass_changed
+                and (entry.kind~=p.kind or entry.material~=p.material)) or protected~=p.protected then
                 return finish(fail('stale_plan','terrain, metadata, or protection changed at '..p.x..','..p.y..','..p.z))
             end
         end
