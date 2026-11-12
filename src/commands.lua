@@ -26,6 +26,26 @@ local function summary(status)
         sm.chunks_completed or 0,sm.chunks_total or 0,sm.columns_completed or 0,sm.tiles_completed or 0) end
     local pm=status.search_metrics
     if pm then lines[#lines+1]=string.format("Search: %d expansions, %d states.",pm.expansions or 0,pm.states or 0) end
+    local search_error = status.error and status.error.code
+    if (search_error=="bounded_no_route" or search_error=="expansion_budget"
+        or search_error=="state_budget" or search_error=="heap_budget")
+        and pm and type(pm.rejections)=="table" then
+        local rejected={}
+        for code,count in pairs(pm.rejections) do
+            if type(code)=="string" and type(count)=="number" and count>0 then
+                rejected[#rejected+1]={code=code,count=count}
+            end
+        end
+        table.sort(rejected,function(a,b)
+            if a.count~=b.count then return a.count>b.count end
+            return a.code<b.code
+        end)
+        local details={}
+        for i=1,math.min(3,#rejected) do
+            details[#details+1]=rejected[i].code.." "..rejected[i].count
+        end
+        if #details>0 then lines[#lines+1]="Most common rejected edges: "..table.concat(details,", ").."." end
+    end
     if status.metrics then
         lines[#lines+1]=string.format("Route: cost %.1f, length %.1f, max grade %.3f, cuts %d, fills %d.",
             status.cost or 0,status.metrics.length or 0,status.metrics.max_grade or 0,
@@ -79,7 +99,7 @@ function commands.register(engine,controller,surface,world_config,preview_render
             if not route then return false,why.reason end
             local count,preview_error=preview_renderer:show(name,route)
             if not count then return false,preview_error.reason end
-            return true,string.format("Showing %d temporary route markers for 8 seconds.",count)
+            return true,string.format("Showing %d temporary route markers for 30 seconds. Look above the road.",count)
         end)
     end
     return true

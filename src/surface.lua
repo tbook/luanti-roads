@@ -10,14 +10,22 @@ allow("natural", {"mcl_core:stone", "mcl_core:dirt", "mcl_core:dirt_with_grass",
     "mcl_core:dirt_with_grass_snow", "mcl_core:podzol", "mcl_core:redsand",
     "mcl_core:sand", "mcl_core:gravel", "mcl_core:clay", "mcl_core:sandstone",
     "mcl_core:granite", "mcl_core:andesite", "mcl_core:diorite", "mcl_core:snowblock",
-    "mcl_core:cobble"})
+    "mcl_core:cobble", "mcl_core:stone_with_coal", "mcl_core:stone_with_iron",
+    "mcl_core:stone_with_gold", "mcl_core:stone_with_redstone", "mcl_core:stone_with_redstone_lit",
+    "mcl_core:stone_with_lapis", "mcl_core:stone_with_emerald", "mcl_core:stone_with_diamond",
+    "mcl_copper:stone_with_copper"})
 local leaves = {"mcl_core:leaves", "mcl_core:darkleaves", "mcl_core:jungleleaves",
     "mcl_core:acacialeaves", "mcl_core:spruceleaves", "mcl_core:birchleaves",
     "mcl_core:mangroveleaves"}
 allow("replaceable", leaves)
 for _, name in ipairs(leaves) do walkable_leaves[name] = true end
 allow("replaceable", {"mcl_flowers:tallgrass", "mcl_flowers:fern",
-    "mcl_flowers:clover", "mcl_flowers:fourleaf_clover", "mcl_core:deadbush"})
+    "mcl_flowers:clover", "mcl_flowers:fourleaf_clover", "mcl_core:deadbush",
+    "mcl_flowers:poppy", "mcl_flowers:dandelion", "mcl_flowers:oxeye_daisy",
+    "mcl_flowers:tulip_orange", "mcl_flowers:tulip_pink", "mcl_flowers:tulip_red",
+    "mcl_flowers:tulip_white", "mcl_flowers:allium", "mcl_flowers:azure_bluet",
+    "mcl_flowers:blue_orchid", "mcl_flowers:lily_of_the_valley", "mcl_flowers:cornflower",
+    "mcl_core:vine", "mcl_mushrooms:mushroom_brown", "mcl_mushrooms:mushroom_red"})
 allow("water", {"mcl_core:water_source", "mcl_core:water_flowing"})
 classes.air = "air"
 

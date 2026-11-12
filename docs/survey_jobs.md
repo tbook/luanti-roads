@@ -22,7 +22,9 @@ The inspector needs the entire vertical window to identify the outdoor surface.
 The job therefore completes the preflight's bounded mapchunk emerges first,
 then reads the requested region as 4-by-4 horizontal tiles spanning the full
 vertical inspection window. Each tile is released after its summaries are
-copied, and work yields before the next tile. The job loads each tile's blocks
+copied. A callback processes at most eight tiles, stopping between tiles once
+10 ms has elapsed, before yielding. An individual tile can exceed that time.
+The job loads each tile's blocks
 before reading it, because emerged blocks can be evicted while earlier tiles
 are being inspected. Rounded mapblock load volumes are capped independently.
 Missing blocks remain unknown; loading does not generate new terrain. Ground
@@ -36,6 +38,11 @@ Metrics report completed chunks, callbacks, tiles, columns, time waiting for
 emerge, total and maximum inspection-tile time including summary copying,
 maximum inspection and emerge volumes, and total elapsed time on success.
 They also include load time and the maximum rounded load volume.
+
+After surveying, the planning lifecycle schedules each running search slice
+for the next Luanti server step. Each slice retains its 5 ms deadline and
+expansion cap; a single search expansion cannot be interrupted. Survey status
+polls still run at 100 ms intervals. Cancellation invalidates queued work.
 
 ## Disposable-world integration
 

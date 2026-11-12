@@ -81,4 +81,17 @@ test("load failure and out of overworld ground fail closed",function()
     end
     complete(f); assert(f.job:status().terrain.get_column(0,0).status=="unknown")
 end)
+test("inspection slices yield on time or tile count and cancellation stops remaining tiles",function()
+    local f=fixture(); local inspected=0
+    local original=f.inspector.inspect
+    f.inspector.inspect=function(...) inspected=inspected+1; f.advance(0.006); return original(...) end
+    f.run(); f.callbacks(f.requests[1]); f.run(); f.callbacks(f.requests[2]); f.run()
+    f.run(); assert(inspected==2 and f.job:status().status=="running")
+    f.job:cancel(); f.run(); assert(inspected==2 and f.job:status().status=="cancelled")
+    f=fixture(); inspected=0; original=f.inspector.inspect
+    f.inspector.inspect=function(...) inspected=inspected+1; return original(...) end
+    f.run(); f.callbacks(f.requests[1]); f.run(); f.callbacks(f.requests[2]); f.run()
+    f.run(); assert(inspected==8 and f.job:status().status=="running")
+    f.run(); assert(inspected==9 and f.job:status().status=="succeeded")
+end)
 print("ok - "..count.." asynchronous survey tests")

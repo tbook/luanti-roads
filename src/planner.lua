@@ -113,9 +113,14 @@ function planner.new(terrain, request, config)
             return nil, failure('invalid_endpoint', 'endpoint does not match surveyed ground', {position=copy(p)})
         end
     end
+    if type(edges.check_goal_cap) == 'function' then
+        local feasible, cap_error = edges.check_goal_cap(terrain, b, {road_material=road_material})
+        if not feasible then return nil, cap_error end
+    end
     local self = {terrain=terrain, request=copy(request), weights=weights, limits=limits,
         heap={}, records={}, serial=0, pending=nil, terminal=nil,
-        metrics={expansions=0, states=1, heap_peak=1, stale_entries=0, rejections={}}}
+        metrics={expansions=0, states=1, heap_peak=1, stale_entries=0, rejections={}},
+        start_rejections={}}
     a,b = self.request.start,self.request.goal
     local goal_i, goal_j = dx/4,dz/4
     local function heuristic(i,j) return 4 * math.sqrt((goal_i-i)^2 + (goal_j-j)^2) end
@@ -167,7 +172,15 @@ function planner.new(terrain, request, config)
         local function expired() return slice.deadline ~= nil and clock() >= slice.deadline end
         while used < slice.max_expansions do
             if not self.pending then
-                if #self.heap == 0 then return finish('failed',failure('bounded_no_route','frontier exhausted', {bounds=copy(terrain.bounds)})) end
+                if #self.heap == 0 then
+                    local issue = self.metrics.expansions == 1 and self.start_rejections.structure
+                    if issue then
+                        return finish('failed',failure('bounded_no_route',
+                            'No departure from the start was feasible; some road footprints meet a structure. Choose a clear starting area',
+                            {bounds=copy(terrain.bounds), position=copy(issue.position), cause='structure'}))
+                    end
+                    return finish('failed',failure('bounded_no_route','frontier exhausted', {bounds=copy(terrain.bounds)}))
+                end
                 if expired() then break end
                 local entry = pop(self.heap)
                 if self.records[key(entry.record.i,entry.record.j,entry.record.heading)] ~= entry.record then
@@ -195,6 +208,9 @@ function planner.new(terrain, request, config)
                     if not edge.ok then
                         if not local_errors[edge.code] then return finish('failed',failure(edge.code,edge.reason,{position=edge.position})) end
                         self.metrics.rejections[edge.code] = (self.metrics.rejections[edge.code] or 0) + 1
+                        if rec.parent == nil and not self.start_rejections[edge.code] then
+                            self.start_rejections[edge.code] = {position=copy(edge.position)}
+                        end
                     else
                         local s, g = edge.next_state, rec.g + edge.cost
                         local id = key(s.i,s.j,s.heading)
