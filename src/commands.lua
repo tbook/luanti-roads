@@ -46,6 +46,10 @@ local function summary(status)
         end
         if #details>0 then lines[#lines+1]="Most common rejected edges: "..table.concat(details,", ").."." end
     end
+    if status.build_metrics then
+        lines[#lines+1]=string.format("Construction: %d writes, %.3f seconds synchronous pause.",
+            status.build_metrics.writes or 0,status.build_metrics.pause_seconds or 0)
+    end
     if status.metrics then
         lines[#lines+1]=string.format("Route: cost %.1f, length %.1f, max grade %.3f, cuts %d, fills %d.",
             status.cost or 0,status.metrics.length or 0,status.metrics.max_grade or 0,
@@ -91,6 +95,12 @@ function commands.register(engine,controller,surface,world_config,preview_render
         local ok,err=controller:cancel(name)
         if not ok then return false,err.reason end
         return true,"Road planning cancelled and its server slot released."
+    end)
+    register("roads_build","Build your planned road",function(name)
+        if not engine.get_player_by_name(name) then return false,"This command requires an online player." end
+        local ok,why=controller:build(name)
+        if not ok then return false,tostring(why.code)..": "..tostring(why.reason) end
+        return true,"Road construction started; use /roads_status to check progress."
     end)
     if preview_renderer then
         register("roads_preview","Show your route as a temporary particle preview",function(name)
