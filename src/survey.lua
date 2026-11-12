@@ -85,9 +85,17 @@ local function validate_config(c)
     if not m then return nil,err,code end
     local d; d,err,code=read_bounds("dimension_bounds")
     if not d then return nil,err,code end
+    -- Independent safe interval supplied by the VoxeLibre integration, outside
+    -- which a chunk may intersect another realm or its barrier.
+    local safe=c.safe_generation_bounds
+    if type(safe) ~= "table" or not finite_integer(safe.min_y) or not finite_integer(safe.max_y)
+        or safe.min_y > safe.max_y or math.abs(safe.min_y)>survey.ENGINE_COORD_LIMIT
+        or math.abs(safe.max_y)>survey.ENGINE_COORD_LIMIT then
+        return nil,"safe_generation_bounds with inclusive min_y and max_y are required","unsupported_world"
+    end
     return {chunk_nodes=survey.STANDARD_CHUNK_NODES,
         origin={x=c.chunk_origin.x,y=c.chunk_origin.y,z=c.chunk_origin.z},
-        map_limits=m,dimension_bounds=d}
+        map_limits=m,dimension_bounds=d,safe_generation_bounds=safe}
 end
 
 local function chunk_index(v, origin, size)
@@ -145,14 +153,11 @@ function survey.plan(start_point, end_point, config)
         min_y=math.min(start_point.y,end_point.y)-survey.VERTICAL_PADDING,
         max_y=math.max(start_point.y,end_point.y)+survey.VERTICAL_PADDING,
     }
-    local function inside(b)
-        return requested.min_x>=b.min_x and requested.max_x<=b.max_x
-            and requested.min_y>=b.min_y and requested.max_y<=b.max_y
-            and requested.min_z>=b.min_z and requested.max_z<=b.max_z
-    end
-    if not inside(cfg.dimension_bounds) then
-        return failure("unsupported_world", "survey request exceeds supported overworld dimension bounds",
-            {bounds=requested,dimension_bounds=cfg.dimension_bounds})
+    local dimension=cfg.dimension_bounds
+    if start_point.y<dimension.min_y or start_point.y>dimension.max_y
+        or end_point.y<dimension.min_y or end_point.y>dimension.max_y then
+        return failure("unsupported_world", "endpoint is outside the overworld",
+            {dimension_bounds=dimension})
     end
     local vertical_span=requested.max_y-requested.min_y+1
     if vertical_span > survey.MAX_VERTICAL_SPAN then
@@ -170,11 +175,19 @@ function survey.plan(start_point, end_point, config)
         return failure("unsupported_world", "complete mapchunk coverage exceeds world map limits",
             {bounds=rounded,map_limits=m})
     end
-    if rounded.min_x<cfg.dimension_bounds.min_x or rounded.max_x>cfg.dimension_bounds.max_x
-        or rounded.min_y<cfg.dimension_bounds.min_y or rounded.max_y>cfg.dimension_bounds.max_y
-        or rounded.min_z<cfg.dimension_bounds.min_z or rounded.max_z>cfg.dimension_bounds.max_z then
+    local envelope_min,envelope_max=axis_bounds(dimension.min_y-survey.VERTICAL_PADDING,
+        dimension.max_y+survey.VERTICAL_PADDING,cfg.origin.y,cfg.chunk_nodes)
+    envelope_min=math.max(envelope_min,m.min_y)
+    envelope_max=math.min(envelope_max,m.max_y)
+    if rounded.min_x<dimension.min_x or rounded.max_x>dimension.max_x
+        or rounded.min_z<dimension.min_z or rounded.max_z>dimension.max_z
+        or rounded.min_y<envelope_min or rounded.max_y>envelope_max then
         return failure("unsupported_world", "complete mapchunk coverage exceeds supported overworld dimension bounds",
-            {bounds=rounded,dimension_bounds=cfg.dimension_bounds})
+            {bounds=rounded,dimension_bounds=dimension})
+    end
+    if rounded.min_y<cfg.safe_generation_bounds.min_y or rounded.max_y>cfg.safe_generation_bounds.max_y then
+        return failure("unsupported_world", "complete mapchunk coverage crosses a protected realm boundary",
+            {bounds=rounded,safe_generation_bounds=cfg.safe_generation_bounds})
     end
 
     -- Count the union of chunks covering the inclusive rectangular survey. A

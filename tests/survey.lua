@@ -11,7 +11,7 @@ local function config(overrides)
         map_limits={min_x=-31000,max_x=31000,min_y=-31000,max_y=31000,
             min_z=-31000,max_z=31000},
         dimension_bounds={min_x=-31000,max_x=31000,min_y=-31000,max_y=31000,
-            min_z=-31000,max_z=31000}}
+            min_z=-31000,max_z=31000},safe_generation_bounds={min_y=-31000,max_y=31000}}
     for k,v in pairs(overrides or {}) do c[k]=v end
     return c
 end
@@ -124,8 +124,27 @@ end)
 test("dimension bounds reject non-overworld requests",function()
     local c=config({dimension_bounds={min_x=-100,max_x=100,min_y=-20,max_y=100,
         min_z=-100,max_z=100}})
-    local p,err=survey.plan({x=0,y=0,z=0},{x=0,y=0,z=0},c)
+    local p,err=survey.plan({x=0,y=-21,z=0},{x=0,y=0,z=0},c)
     assert(not p and err.code=="unsupported_world" and err.dimension_bounds)
+end)
+
+test("normal and flat overworld permit padded coverage into safe void",function()
+    for _,v in ipairs({{mapgen="v7",min_y=-62},{mapgen="flat",min_y=9}}) do
+        local c=config({mapgen=v.mapgen,dimension_bounds={min_x=-31000,max_x=31000,
+            min_y=v.min_y,max_y=30000,min_z=-31000,max_z=31000},
+            safe_generation_bounds={min_y=v.min_y-1999,max_y=31000}})
+        local p=assert(survey.plan({x=0,y=12,z=0},{x=4,y=12,z=0},c))
+        assert(p.requested_bounds.min_y==-36 and p.requested_bounds.max_y==60)
+        assert(p.chunk_bounds.min_y==-112 and p.chunk_bounds.max_y==127)
+        local missing=config({safe_generation_bounds=false})
+        local no,e=survey.plan({x=0,y=12,z=0},{x=4,y=12,z=0},missing)
+        assert(not no and e.code=="unsupported_world")
+        no,e=survey.plan({x=0,y=v.min_y-2000,z=0},{x=4,y=v.min_y-2000,z=0},c)
+        assert(not no and e.code=="unsupported_world")
+        c.safe_generation_bounds.min_y=-111
+        no,e=survey.plan({x=0,y=12,z=0},{x=4,y=12,z=0},c)
+        assert(not no and e.code=="unsupported_world" and e.safe_generation_bounds)
+    end
 end)
 
 test("chunk-rounded generation cannot cross an overworld dimension boundary",function()
