@@ -4,7 +4,7 @@ local planner = {}
 local edges
 local defaults = {slope=4, turn=2, cut=1, fill=1}
 local local_errors = {outside=true, unknown=true, water=true, structure=true, grade=true,
-    earthwork=true, support=true, clearance=true, protected=true, profile_conflict=true, step_height=true}
+    earthwork=true, support=true, clearance=true, protected=true, profile_conflict=true, step_height=true, connector=true}
 
 local function finite(n)
     return type(n) == 'number' and n == n and n ~= math.huge and n ~= -math.huge
@@ -98,16 +98,26 @@ function planner.new(terrain, request, config)
     local requested_a, requested_b = request.provenance.start.requested, request.provenance.goal.requested
     local requested_dx, requested_dz = requested_b.x-requested_a.x, requested_b.z-requested_a.z
     local ground_b = request.provenance.goal.ground
+    local pa,pb=request.provenance.start,request.provenance.goal
+    local constraints, constraint_error
+    if pa.connector or pb.connector then
+        if type(edges.connector_constraints)~='function' then return nil, failure('invalid_config','connector constraints unavailable') end
+        constraints, constraint_error=edges.connector_constraints(request.provenance)
+        if not constraints then return nil, failure('invalid_endpoint',constraint_error) end
+    end
     if (dx == 0 and dz == 0) or dx % 4 ~= 0 or dz % 4 ~= 0 or dx*dx+dz*dz > 192*192
         or requested_dx*requested_dx+requested_dz*requested_dz > 192*192
-        or not same(request.provenance.start.ground,a)
-        or b.x ~= a.x + 4*math.floor((requested_b.x-a.x)/4+0.5)
+        or (not pa.connector and not same(pa.ground,a))
+        or (not pb.connector and (b.x ~= a.x + 4*math.floor((requested_b.x-a.x)/4+0.5)
         or b.z ~= a.z + 4*math.floor((requested_b.z-a.z)/4+0.5)
         or (requested_b.x-b.x)^2+(requested_b.z-b.z)^2 > 9
-        or math.abs(ground_b.y-b.y) > 2 then
+        or math.abs(ground_b.y-b.y) > 2)) then
         return nil, failure('invalid_endpoint', 'endpoints must be distinct, aligned, and within range')
     end
-    for _,p in ipairs({a,b,request.provenance.start.ground,request.provenance.goal.ground}) do
+    local checked={a,b}
+    if not pa.connector then checked[#checked+1]=pa.ground end
+    if not pb.connector then checked[#checked+1]=pb.ground end
+    for _,p in ipairs(checked) do
         local ok,c = pcall(terrain.get_column,p.x,p.z)
         if not ok or type(c) ~= 'table' or c.status ~= 'ok' or c.ground_y ~= p.y then
             return nil, failure('invalid_endpoint', 'endpoint does not match surveyed ground', {position=copy(p)})
@@ -204,7 +214,7 @@ function planner.new(terrain, request, config)
                 if rec.heading == nil then headings = {0,1,2,3,4,5,6,7}
                 else headings = {rec.heading,(rec.heading+1)%8,(rec.heading+7)%8} end
                 for _,h in ipairs(headings) do
-                    local edge = edges.evaluate(terrain,a,rec,h,{weights=weights, road_material=road_material})
+                    local edge = edges.evaluate(terrain,a,rec,h,{weights=weights, road_material=road_material, constraints=constraints})
                     if not edge.ok then
                         if not local_errors[edge.code] then return finish('failed',failure(edge.code,edge.reason,{position=edge.position})) end
                         self.metrics.rejections[edge.code] = (self.metrics.rejections[edge.code] or 0) + 1

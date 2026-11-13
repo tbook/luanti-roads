@@ -96,4 +96,72 @@ for _,change in ipairs({
     local _,_,w,job,e=scenario(change)
     assert(not job and e.code=='build_failed' and #w==0)
 end
-print('ok - 10 construction test scenarios')
+local function connector_scenario(change)
+    return scenario(function(plan,ops,w)
+        local p={x=1,y=0,z=0,name='mcl_stairs:stair_cobble',param2=1,
+            has_metadata=false,protected=false}
+        local support={x=2,y=0,z=0,name='mcl_core:stone',param2=0,has_metadata=false,protected=false}
+        local clear={x=3,y=0,z=0,name='air',param2=0,has_metadata=false,protected=false}
+        local c={version=1,preserved={p,support,clear}}
+        plan.version=2; plan.connector_version=1
+        plan.endpoints={start={connector=c}}
+        plan.request={provenance={start={connector=c}}}
+        plan.expectations[#plan.expectations+1]=p
+        plan.expectations[#plan.expectations+1]=support
+        plan.expectations[#plan.expectations+1]=clear
+        local get=ops.access.get_node
+        ops.access.get_node=function(pos)
+            if pos.x==1 then return {name=p.name,param2=1} end
+            if pos.x==2 then return {name=support.name,param2=0} end
+            if pos.x==3 then return {name=clear.name,param2=0} end
+            return get(pos)
+        end
+        if change then change(plan,ops,w) end
+    end)
+end
+result,metrics,writes=connector_scenario()
+assert(result=='success' and #writes==2)
+local legacy=dofile('tests/legacy_build_gate.lua')
+local scheduled=0
+assert(not legacy({version=2,connector_version=1,owner='alice',writes={{x=0,y=0,z=0}},
+    expectations={},endpoints={start={connector={version=1}}}}, {after=function() scheduled=scheduled+1 end}))
+assert(scheduled==0, 'version-one builder must reject connector plan before scheduling')
+assert(legacy({version=1,owner='alice',writes={},expectations={}}, {after=function() scheduled=scheduled+1 end}))
+assert(scheduled==1, 'legacy gate fixture must accept an ordinary version-one plan')
+for _,change in ipairs({
+    function(_,ops) local get=ops.access.get_node; ops.access.get_node=function(p)
+        if p.x==1 then return {name='mcl_stairs:stair_cobble',param2=2} end
+        return get(p)
+    end end,
+    function(_,ops) local meta=ops.access.has_metadata; ops.access.has_metadata=function(p)
+        return p.x==1 or meta(p)
+    end end,
+    function(_,ops) local timer=ops.has_timer; ops.has_timer=function(p)
+        return p.x==1 or timer(p)
+    end end,
+    function(_,ops) local get=ops.access.get_node; ops.access.get_node=function(p)
+        if p.x==2 then return {name='air',param2=0} end; return get(p)
+    end end,
+    function(_,ops) local get=ops.access.get_node; ops.access.get_node=function(p)
+        if p.x==3 then return {name='mcl_core:stone',param2=0} end; return get(p)
+    end end,
+    function(_,ops) local protected=ops.access.is_protected; ops.access.is_protected=function(p)
+        return p.x==2 or protected(p)
+    end end,
+}) do
+    local stale,_,performed=connector_scenario(change)
+    assert(stale.code=='stale_plan' and #performed==0)
+end
+for _,change in ipairs({
+    function(plan) plan.connector_version=nil end,
+    function(plan) plan.connector_version=2 end,
+    function(plan) plan.expectations[4]=nil end,
+    function(plan) plan.writes[#plan.writes+1]={x=1,y=0,z=0,kind='road'} end,
+    function(plan) plan.expectations[#plan.expectations+1]=plan.expectations[4] end,
+    function(plan) plan.request.provenance.start.connector={version=1,preserved={{x=9,y=0,z=0,
+        name='mcl_core:stone',param2=0,has_metadata=false,protected=false}}} end,
+}) do
+    local _,_,performed,job,e=connector_scenario(change)
+    assert(not job and e.code=='build_failed' and #performed==0)
+end
+print('ok - construction scenarios, stale connector checks and version rejection')
