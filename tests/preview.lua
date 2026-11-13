@@ -82,7 +82,8 @@ test("renderer targets owner, expires particles, and enforces per-player rate ca
     assert(n==#emitted and n<=preview.MAX_PARTICLES)
     for _,p in ipairs(emitted) do
         assert(p.playername=="alice" and p.expirationtime==preview.EXPIRY)
-        assert(p.texture=="roads_preview.png" and p.collisiondetection==false)
+        assert(p.texture:find("roads_preview.png",1,true)==1 and p.texture:find("fff35c",1,true)
+            and p.collisiondetection==false)
         assert(p.size>=8 and p.glow==14 and p.expirationtime>=30,
             "markers should be conspicuous, lit, and last long enough to inspect")
     end
@@ -93,6 +94,47 @@ test("renderer targets owner, expires particles, and enforces per-player rate ca
     assert(renderer:show("alice",line))
     now=preview.RATE_LIMIT
     assert(renderer:show("alice",line))
+end)
+
+test("connector walking path and transition use distinct bounded particle colors",function()
+    local now,emitted=0,{}
+    local renderer=assert(preview.new({add_particle=function(def) emitted[#emitted+1]=def end},function() return now end))
+    local endpoints={start={connector={version=1,
+        path={{x=-2,y=0,z=0},{x=-1.5,y=.5,z=0},{x=-1,y=1,z=0}},
+        transition={path={{x=0,y=1,z=0},{x=1,y=1,z=0}}}}}}
+    local n=assert(renderer:show("alice",{{x=0,y=1,z=0},{x=4,y=1,z=0}},endpoints))
+    assert(n==#emitted and n<=preview.MAX_PARTICLES)
+    local main,path,transition=false,false,false
+    for _,p in ipairs(emitted) do
+        if p.texture:find("fff35c",1,true) then main=true end
+        if p.texture:find("55e6ff",1,true) then path=true end
+        if p.texture:find("ff9f43",1,true) then transition=true end
+        assert(p.playername=="alice" and p.expirationtime==30)
+        assert(p.pos.x==p.pos.x and p.pos.y==p.pos.y and p.pos.z==p.pos.z,"finite particle coordinates")
+    end
+    assert(main and path and transition)
+    now=8; emitted={}
+    endpoints.start.connector.path={{x=0,y=0,z=0},{x=0,y=2,z=0}}
+    local bad,err=renderer:show("alice",{{x=0,y=0,z=0},{x=4,y=0,z=0}},endpoints)
+    assert(not bad and err.code=="invalid_route" and #emitted==0)
+end)
+
+test("long routes retain finite short connectors at both ends within the shared budget",function()
+    local emitted={}
+    local renderer=assert(preview.new({add_particle=function(p) emitted[#emitted+1]=p end},function() return 0 end))
+    local line={}; for x=0,500 do line[#line+1]={x=x,y=0,z=0} end
+    local function endpoint(x,sign)
+        return {connector={version=1,path={{x=x+1.5*sign,y=.5,z=0},{x=x+sign,y=.5,z=0}},
+            transition={path={{x=x,y=.5,z=0}}}}}
+    end
+    local n=assert(renderer:show("alice",line,{start=endpoint(0,-1),goal=endpoint(500,1)}))
+    assert(n==preview.MAX_PARTICLES and #emitted==n)
+    local found={}
+    for _,p in ipairs(emitted) do
+        assert(p.pos.x==p.pos.x and p.pos.y==p.pos.y and p.pos.z==p.pos.z)
+        found[p.pos.x]=true
+    end
+    assert(found[-1.5] and found[-1] and found[0] and found[500] and found[501] and found[501.5])
 end)
 
 test("repeated previews stay bounded while older markers remain visible",function()

@@ -287,10 +287,12 @@ print("ok - " .. count .. " planner geometry/edge tests")
 dofile("tests/planner.lua")
 dofile("tests/plans.lua")
 dofile("tests/surface.lua")
+dofile("tests/connectors.lua")
 dofile("tests/survey.lua")
 
 dofile("tests/survey_job.lua")
 dofile("tests/jobs.lua")
 dofile("tests/preview.lua")
+dofile("tests/presentation.lua")
 
 dofile("tests/build.lua")
