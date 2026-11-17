@@ -107,7 +107,7 @@ end
 local function outward_route(s)
     local r=s.road
     if type(r)~="table" or type(r.centerline)~="table" or #r.centerline==0 then return nil end
-    return r.centerline
+    return r.centerline,r.endpoints
 end
 
 -- One precise failure as text. Every sentence ends with a full stop.
@@ -286,8 +286,7 @@ function commands.register(engine,controller,surface,world_config,preview_render
             if not route and outward and last_outward[name] then
                 -- No manual plan: show the centreline of this player's last outward road.
                 local latest=outward.service:status(last_outward[name])
-                route=outward_route(latest or {})
-                endpoints=nil
+                route,endpoints=outward_route(latest or {})
             end
             if not route then return false,why.reason end
             local count,preview_error=preview_renderer:show(name,route,endpoints)

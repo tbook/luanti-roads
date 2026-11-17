@@ -10,6 +10,7 @@ local outward = {}
 local MAX_CHUNKS = 96
 local MAX_EXPANSIONS = 150000
 local MAX_CANDIDATES = 4
+local MAX_PREVIEW_OPERATIONS = 64
 local WRITER_WAIT = 180
 local OWNER = "roads:outward" -- a colon cannot appear in a player name
 
@@ -18,6 +19,23 @@ local function copy(value)
     local result = {}
     for k, v in pairs(value) do result[k] = copy(v) end
     return result
+end
+-- Keep only the small walking geometry needed by /roads_preview. The full
+-- endpoint provenance contains terrain expectations and must stay out of the
+-- persistent outward-operation record.
+local function preview_endpoints(endpoints)
+    if type(endpoints) ~= "table" then return nil end
+    local result = {}
+    for _, side in ipairs({"start", "goal"}) do
+        local endpoint = endpoints[side]
+        local connector = type(endpoint) == "table" and endpoint.connector or nil
+        if type(connector) == "table" and type(connector.path) == "table"
+            and type(connector.transition) == "table" and type(connector.transition.path) == "table" then
+            result[side] = {connector = {version = 1, path = copy(connector.path),
+                transition = {path = copy(connector.transition.path)}}}
+        end
+    end
+    return next(result) and result or nil
 end
 local function error_result(code, reason, extra)
     local result = extra or {}
@@ -42,6 +60,9 @@ function outward.new(ops)
     local jobs, towns, store = ops.jobs, ops.towns, ops.store
     local self = {active = nil}
     local next_token = 0
+    -- Display-only geometry stays out of the durable operation record.
+    local preview_geometry = {}
+    local preview_order = {}
 
     local function log(level, message)
         if ops.log then pcall(ops.log, level, "[roads] " .. message) end
@@ -66,7 +87,7 @@ function outward.new(ops)
             persisted = not op.persist_failed,
             road = road and {chosen_index = road.chosen_index, requested_target = copy(road.requested_target),
                 resolved_target = copy(road.resolved_target), landing = copy(road.landing),
-                centerline = copy(road.centerline), terminal = copy(road.terminal),
+                centerline = copy(road.centerline), endpoints = copy(preview_geometry[op.op_id]), terminal = copy(road.terminal),
                 terminal_heading = road.terminal_heading, outward = copy(road.outward), metrics = copy(road.metrics),
                 write_count = road.write_count, expectation_count = road.expectation_count} or nil}
     end
@@ -199,6 +220,14 @@ function outward.new(ops)
             metrics = {length = m.length, ascent = m.ascent, descent = m.descent, max_grade = m.max_grade,
                 turns = m.turn_count, cuts = m.cut_count, fills = m.fill_count},
             write_count = #plan.writes, expectation_count = #plan.expectations, footprint = footprint}
+        local preview = preview_endpoints(plan.endpoints)
+        if preview then
+            preview_geometry[op.op_id] = preview
+            preview_order[#preview_order + 1] = op.op_id
+            while #preview_order > MAX_PREVIEW_OPERATIONS do
+                preview_geometry[table.remove(preview_order, 1)] = nil
+            end
+        end
         op.state = "building"; op.writes = "unknown"; op.aggregate = copy(act.agg)
         local saved, save_err = save(op, true)
         if not saved then

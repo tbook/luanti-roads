@@ -176,11 +176,13 @@ interaction) and real VoxeLibre geometry.
   footprint (core and structures) is checked when generating targets. Exclusions, other settlements
   and the connector's own rules are enforced later by the service's overlay,
   endpoint resolution, and build guard.
-- **Route geometry is a sample, not the connector.** `/roads_status` shows the
-  landing, up to eight centreline waypoints, the terminal and its heading. The
-  preview shows the full centreline of the last outward road for its requester.
-  Neither shows the connector paths or transitions at the exit. Those are not kept
-  in the outward status summary. The journey must still be inspected on foot.
+- **Route geometry is a sample, not the full world view.** `/roads_status` shows
+  the landing, up to eight centreline waypoints, the terminal and its heading.
+  The preview shows the full centreline and the preserved approach and transition
+  connector geometry at the exit for the requester while the server retains that
+  operation in memory. Connector preview data is not persisted and is unavailable
+  after a server restart. It does not inspect later world changes; the journey must
+  still be checked on foot.
 - **Memory-only "last request".** `/roads_status` recalls the settlement a player
   last requested only for the current server session. Other players' finished
   runs are reachable through `roads.outward:status(settlement_id)` (Lua), not
