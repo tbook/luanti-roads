@@ -291,6 +291,8 @@ dofile("tests/connectors.lua")
 dofile("tests/towns_adapter.lua")
 dofile("tests/outward_store.lua")
 dofile("tests/outward.lua")
+dofile("tests/outward_policy.lua")
+dofile("tests/outward_command.lua")
 dofile("tests/survey.lua")
 
 dofile("tests/survey_job.lua")

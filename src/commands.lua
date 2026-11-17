@@ -84,12 +84,117 @@ local function summary(status)
     return table.concat(lines," ")
 end
 
-function commands.register(engine,controller,surface,world_config,preview_renderer)
+local function fmt_target(t)
+    if type(t)~="table" or type(t.x)~="number" or type(t.z)~="number" then return "unknown" end
+    return string.format("(%d, %d)",t.x,t.z)
+end
+local HEADING_VECTORS={{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1}}
+local WAYPOINT_STRIDE,MAX_WAYPOINTS=16,8
+
+-- Indices of a bounded sample: start, every WAYPOINT_STRIDE-th node, end. When
+-- that is still too many, MAX_WAYPOINTS evenly spaced nodes span the route.
+local function waypoint_indices(n)
+    if n<1 then return {} end
+    local picks={}
+    for i=1,n,WAYPOINT_STRIDE do picks[#picks+1]=i end
+    if picks[#picks]~=n then picks[#picks+1]=n end
+    if #picks<=MAX_WAYPOINTS then return picks end
+    local even={}
+    for j=0,MAX_WAYPOINTS-1 do even[#even+1]=1+math.floor(j*(n-1)/(MAX_WAYPOINTS-1)+0.5) end
+    return even
+end
+
+local function outward_route(s)
+    local r=s.road
+    if type(r)~="table" or type(r.centerline)~="table" or #r.centerline==0 then return nil end
+    return r.centerline
+end
+
+-- One precise failure as text. Every sentence ends with a full stop.
+local function failure(e)
+    local parts={tostring(e.code)..": "..tostring(e.reason)}
+    if e.limit~=nil then parts[#parts+1]="(limit "..tostring(e.limit)..", observed "..tostring(e.observed)..")" end
+    if e.position then parts[#parts+1]="at "..fmt_point(e.position) end
+    local text=table.concat(parts," ")
+    if text:sub(-1)~="." then text=text.."." end
+    for _,b in ipairs(type(e.blocked)=="table" and e.blocked or {}) do
+        text=text.." "..tostring(b.settlement_id).." is "..tostring(b.state).."."
+    end
+    for _,s in ipairs(type(e.skipped)=="table" and e.skipped or {}) do
+        text=text.." Exit "..tostring(s.exit_id).." is "..tostring(s.state)..(s.reason and (" ("..s.reason..")") or "").."."
+    end
+    return text
+end
+
+-- Presentation of an outward-road service summary (see src/outward.lua status).
+function commands.outward_summary(s)
+    if type(s)~="table" then return "No outward road is active or recorded for this settlement." end
+    local head="Outward road "..tostring(s.op_id)..": "..tostring(s.state)
+    if s.active then head=head..", stage "..tostring(s.stage) end
+    local lines={head.."."}
+    lines[#lines+1]=string.format("Settlement %s, exit %s, requested by %s.",
+        tostring(s.settlement_id),tostring(s.exit_id),tostring(s.requester))
+    if type(s.candidates)=="table" and #s.candidates>0 then
+        local targets={}
+        for i,t in ipairs(s.candidates) do targets[i]=fmt_target(t) end
+        lines[#lines+1]="Targets "..table.concat(targets,", ")..(s.current_target and (", trying "..fmt_target(s.current_target)) or "").."."
+    end
+    for _,a in ipairs(type(s.attempts)=="table" and s.attempts or {}) do
+        lines[#lines+1]=string.format("Attempt %d to %s: %s%s.",a.index or 0,fmt_target(a.target),
+            tostring(a.outcome),a.reason and (" - "..tostring(a.reason)) or "")
+    end
+    local r=s.road
+    if r then
+        local m=r.metrics or {}
+        lines[#lines+1]=string.format("Road to %s, resolved %s, terminal %s: length %.1f, ascent %d, descent %d, max grade %.3f, turns %d, cuts %d, fills %d, %d writes.",
+            fmt_target(r.requested_target),fmt_target(r.resolved_target),fmt_target(r.terminal),
+            m.length or 0,m.ascent or 0,m.descent or 0,m.max_grade or 0,m.turns or 0,m.cuts or 0,m.fills or 0,r.write_count or 0)
+    end
+    local a=s.aggregate
+    if type(a)=="table" and (a.chunks or 0)>0 then
+        lines[#lines+1]=string.format("Aggregate: %d chunks (%d requests), %d expansions, survey %.1f s, search %.1f s, longest slice %.3f s, peak states %d, peak heap %d.",
+            a.chunks or 0,a.chunk_requests or 0,a.expansions or 0,a.survey_seconds or 0,a.search_seconds or 0,
+            a.longest_slice or 0,a.peak_states or 0,a.peak_heap_entries or 0)
+    elseif type(a)=="table" and (a.expansions or 0)>0 then
+        lines[#lines+1]=string.format("Aggregate: %d expansions, search %.1f s, peak states %d.",
+            a.expansions or 0,a.search_seconds or 0,a.peak_states or 0)
+    end
+    if type(a)=="table" and a.limit_reached then
+        lines[#lines+1]="Shared "..tostring(a.limit_reached).." budget reached (limit "..tostring(a.limit)..", observed "..tostring(a.observed)..")."
+    end
+    if r and type(r.centerline)=="table" and #r.centerline>0 then
+        local line=r.centerline
+        local pts={}
+        for _,i in ipairs(waypoint_indices(#line)) do pts[#pts+1]=fmt_point(line[i]) end
+        local hv=HEADING_VECTORS[(tonumber(r.terminal_heading) or 0)+1] or {0,0}
+        lines[#lines+1]=string.format("Route geometry: landing %s, outward (%d, %d); %d centreline nodes, waypoints %s; terminal %s, heading %s toward (%d, %d).",
+            fmt_point(r.landing),(r.outward or {}).x or 0,(r.outward or {}).z or 0,#line,table.concat(pts,", "),
+            fmt_point(r.terminal),tostring(r.terminal_heading),hv[1],hv[2])
+    end
+    if s.writes then lines[#lines+1]="Writes: "..tostring(s.writes).."." end
+    if s.build then
+        lines[#lines+1]=string.format("Construction: %d writes, %.3f seconds synchronous pause.",s.build.writes or 0,s.build.pause_seconds or 0)
+    end
+    if s.error then lines[#lines+1]="Error "..failure(s.error) end
+    if s.cancelled_by then lines[#lines+1]="Cancelled by "..tostring(s.cancelled_by).."." end
+    if s.persisted==false then lines[#lines+1]="Warning: the record could not be saved and may not survive a restart." end
+    return table.concat(lines," ")
+end
+
+-- outward (optional) = {service, towns, policy, seed=function() -> string};
+-- without it /roads_outward is not registered and status/cancel stay manual.
+function commands.register(engine,controller,surface,world_config,preview_renderer,outward)
     if type(engine)~="table" or type(engine.register_chatcommand)~="function"
         or type(controller)~="table" or type(surface)~="table"
         or type(surface.player_feet)~="function" or type(world_config)~="function" then
         return nil,"command dependencies are incomplete"
     end
+    if outward~=nil and (type(outward)~="table" or type(outward.service)~="table"
+        or type(outward.towns)~="table" or type(outward.policy)~="table" or type(outward.seed)~="function") then
+        return nil,"outward command dependencies are incomplete"
+    end
+    -- Settlement each player last requested, so /roads_status can report it after the run ends (memory only).
+    local last_outward={}
     local function player(name)
         local p=engine.get_player_by_name(name)
         if not p then return nil,"This command requires an online player." end
@@ -114,14 +219,60 @@ function commands.register(engine,controller,surface,world_config,preview_render
         if not id then return false,tostring(why.code)..": "..tostring(why.reason) end
         return true,"Road planning job "..id.." started. Surveying can generate new terrain; use /roads_status to check progress."
     end)
-    register("roads_status","Show your road planning status",function(name)
-        return true,summary(controller:status(name))
+    register("roads_status","Show your road planning status, or the outward road status",function(name)
+        local manual=controller:status(name)
+        if outward then
+            local active=outward.service:status()
+            if active then return true,commands.outward_summary(active) end
+            local settlement=last_outward[name]
+            if manual.state=="idle" and settlement then
+                local latest=outward.service:status(settlement)
+                if latest then return true,commands.outward_summary(latest) end
+            end
+        end
+        return true,summary(manual)
     end)
-    register("roads_cancel","Cancel your road planning job or discard its unbuilt plan",function(name)
+    register("roads_cancel","Cancel your road planning job, discard its unbuilt plan, or cancel an active outward road",function(name)
+        if outward and outward.service:status() then
+            local ok,err=outward.service:cancel(name)
+            if not ok then return false,failure(err) end
+            return true,"Outward road cancelled and its server slot released."
+        end
         local ok,err=controller:cancel(name)
         if not ok then return false,err.reason end
         return true,"Road planning cancelled and its server slot released."
     end)
+    if outward then
+        -- Explicit trigger only: this may generate terrain and builds one road
+        -- automatically. There are no endpoint or build steps.
+        register("roads_outward","Automatically build one outward road from a completed Towns settlement. This may generate terrain and automatically builds a road; no endpoint selection or build step is needed.",function(name)
+            local feet,err=player(name); if not feet then return false,err end
+            local service=outward.service
+            local active=service:status()
+            if active then
+                return false,"busy: outward road "..tostring(active.op_id).." is "..tostring(active.stage or active.state)
+                    ..". Use /roads_status or /roads_cancel."
+            end
+            local seed=outward.seed()
+            if not ((type(seed)=="string" and seed~="") or type(seed)=="number") then
+                return false,"unavailable: the world seed could not be read"
+            end
+            local settlements,why=outward.towns:nearby({x=feet.x,z=feet.z},outward.policy.RADIUS)
+            if not settlements then return false,failure(why) end
+            local chosen,choice_error=outward.policy.select({requester=feet,world_seed=seed,settlements=settlements,
+                exit=function(settlement,exit_id) return outward.towns:exit(settlement,exit_id) end,
+                eligibility=function(settlement_id,exit_id) return service:eligibility(settlement_id,exit_id) end})
+            if not chosen then return false,failure(choice_error) end
+            local started,start_error=service:start({settlement_id=chosen.settlement_id,exit_id=chosen.exit_id,
+                requester=name,policy=chosen.policy,candidates=chosen.candidates})
+            if not started then return false,failure(start_error) end
+            last_outward[name]=chosen.settlement_id
+            local targets={}
+            for i,t in ipairs(chosen.candidates) do targets[i]=fmt_target(t) end
+            return true,string.format("Outward road %s started: settlement %s, exit %s, %.1f nodes from the requester, targets %s. It may generate terrain and builds one road automatically; use /roads_status to follow it.",
+                tostring(started.op_id),chosen.settlement_id,chosen.exit_id,chosen.settlement_distance,table.concat(targets,", "))
+        end)
+    end
     register("roads_build","Build your planned road",function(name)
         if not engine.get_player_by_name(name) then return false,"This command requires an online player." end
         local ok,why=controller:build(name)
@@ -132,6 +283,12 @@ function commands.register(engine,controller,surface,world_config,preview_render
         register("roads_preview","Show your route as a temporary particle preview",function(name)
             if not engine.get_player_by_name(name) then return false,"This command requires an online player." end
             local route,why,endpoints=controller:preview_route(name)
+            if not route and outward and last_outward[name] then
+                -- No manual plan: show the centreline of this player's last outward road.
+                local latest=outward.service:status(last_outward[name])
+                route=outward_route(latest or {})
+                endpoints=nil
+            end
             if not route then return false,why.reason end
             local count,preview_error=preview_renderer:show(name,route,endpoints)
             if not count then return false,preview_error.reason end

@@ -171,4 +171,25 @@ test('build guard defers on a writer or candidate, fails on a settlement, and ti
     local w = a:writer(); assert(w and w.phase == 'query_failed') -- a query error counts as busy
 end)
 
+test('nearby keeps Towns order, drops incomplete or malformed records and returns copies', function()
+    local fake, a, s = ready()
+    local near = towns.settlement('auto:1:0', {}); near.center = {x = 40, y = 1, z = 0}
+    local far = towns.settlement('auto:2:0', {}); far.center = {x = 300, y = 1, z = 0}
+    local broken = towns.settlement('auto:3:0', {}); broken.core = nil
+    local building = towns.settlement('auto:4:0', {}); building.state = 'building'
+    fake.others = {s, near, far, broken, building}
+    local list, e = a:nearby({x = 0, z = 0}, 512)
+    assert(list and not e)
+    local ids = {}
+    for _, r in ipairs(list) do ids[#ids + 1] = r.id end
+    assert(table.concat(ids, ',') == 'auto:3:-2,auto:1:0,auto:2:0', table.concat(ids, ','))
+    list[2].center.x = 999
+    assert(near.center.x == 40, 'returned records are copies')
+    local bad, why = a:nearby(nil, 512); assert(not bad and why.code == 'invalid_request')
+    fake.healthy = false
+    bad, why = a:nearby({x = 0, z = 0}, 512); assert(not bad and why.code == 'towns_unavailable')
+    fake.healthy = true; fake.api.version = 2
+    bad, why = a:nearby({x = 0, z = 0}, 512); assert(not bad and why.code == 'towns_unsupported')
+end)
+
 print('ok - '..count..' towns adapter tests')

@@ -58,12 +58,15 @@ function outward.new(ops)
         return {op_id = op.op_id, settlement_id = op.settlement_id, exit_id = op.exit_id, state = op.state,
             writes = op.writes, stage = act and act.stage or nil, active = act ~= nil,
             requester = op.requester, cancelled_by = op.cancelled_by,
-            candidates = copy(op.candidates), attempts = copy(op.attempts), aggregate = copy(op.aggregate),
+            candidates = copy(op.candidates), attempts = copy(op.attempts),
+            -- The live aggregate is kept on the active record until it is committed to the op.
+            aggregate = copy(act and act.agg or op.aggregate),
             current_target = act and op.candidates[act.index] and copy(op.candidates[act.index]) or nil,
             error = copy(op.error), build = copy(op.build), created_at = op.created_at, updated_at = op.updated_at,
             persisted = not op.persist_failed,
             road = road and {chosen_index = road.chosen_index, requested_target = copy(road.requested_target),
-                resolved_target = copy(road.resolved_target), terminal = copy(road.terminal),
+                resolved_target = copy(road.resolved_target), landing = copy(road.landing),
+                centerline = copy(road.centerline), terminal = copy(road.terminal),
                 terminal_heading = road.terminal_heading, outward = copy(road.outward), metrics = copy(road.metrics),
                 write_count = road.write_count, expectation_count = road.expectation_count} or nil}
     end
