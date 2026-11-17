@@ -19,6 +19,7 @@ local build=load("src/build.lua")
 local towns_adapter=load("src/towns_adapter.lua")
 local outward_store=load("src/outward_store.lua")
 local outward=load("src/outward.lua")
+local outward_policy=load("src/outward_policy.lua")
 
 assert(edges.set_raster(raster))
 assert(planner.set_edges(edges))
@@ -77,11 +78,10 @@ local controller,err=lifecycle.new(ops)
 if not controller then error("[roads] cannot initialize job lifecycle: "..tostring(err.reason)) end
 local preview_renderer,preview_error=preview.new(core,function() return core.get_us_time()/1000000 end)
 if not preview_renderer then error("[roads] cannot initialize route preview: "..tostring(preview_error.reason)) end
-assert(commands.register(core,controller,surface,world_config,preview_renderer))
-
 -- Outward-road service. Towns is optional: without towns_api the service
--- reports towns_unavailable and manual commands are unaffected. The command
--- that drives it belongs to a later ticket; trials may call roads.outward.
+-- reports towns_unavailable and manual commands are unaffected. The
+-- /roads_outward command is registered after the service exists.
+local outward_deps=nil
 do
     local mod_storage=core.get_mod_storage()
     local towns=towns_adapter.new(function() return rawget(_G,"towns_api") end,now)
@@ -110,7 +110,10 @@ do
     if not service then error("[roads] cannot initialize outward service: "..tostring(service_error.reason)) end
     service:recover()
     rawset(_G,"roads",{outward=service})
+    outward_deps={service=service,towns=towns,policy=outward_policy,
+        seed=function() return core.get_mapgen_setting("seed") end}
 end
+assert(commands.register(core,controller,surface,world_config,preview_renderer,outward_deps))
 core.register_on_leaveplayer(function(player)
     local name=player:get_player_name()
     controller:disconnect(name)

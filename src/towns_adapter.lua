@@ -96,6 +96,18 @@ local function strip_rect(columns, d, steps)
     return r
 end
 
+local function position(p) return type(p) == "table" and integer(p.x) and integer(p.y) and integer(p.z) end
+
+-- Shape the connector and service depend on, for a complete published record.
+local function well_formed(s)
+    local c, r = s.center, s.reservation
+    local ok_shape = s.state == "complete" and position(c) and type(r) == "table"
+        and position(r.min) and position(r.max) and type(s.core) == "table"
+        and valid_rect(s.core) and type(s.structures) == "table" and type(s.exits) == "table"
+    for _, rect in ipairs(ok_shape and s.structures or {}) do ok_shape = ok_shape and valid_rect(rect) end
+    return ok_shape and true or false
+end
+
 function adapter.new(get_api, now)
     local self = {}
     local clock = type(now) == "function" and now or function() return 0 end
@@ -134,14 +146,29 @@ function adapter.new(get_api, now)
             return err("ineligible_settlement", "settlement is not an eligible completed settlement: "
                 .. tostring(status) .. (message and (" (" .. tostring(message) .. ")") or ""), {status = tostring(status)})
         end
-        local c, r = s.center, s.reservation
-        local function pos(p) return type(p) == "table" and integer(p.x) and integer(p.y) and integer(p.z) end
-        local ok_shape = s.id == id and s.state == "complete" and pos(c) and type(r) == "table"
-            and pos(r.min) and pos(r.max) and type(s.core) == "table"
-            and valid_rect(s.core) and type(s.structures) == "table" and type(s.exits) == "table"
-        for _, rect in ipairs(ok_shape and s.structures or {}) do ok_shape = ok_shape and valid_rect(rect) end
-        if not ok_shape then return err("ineligible_settlement", "published settlement record is malformed", {status = "invalid"}) end
+        if s.id ~= id or not well_formed(s) then return err("ineligible_settlement", "published settlement record is malformed", {status = "invalid"}) end
         return copy(s)
+    end
+
+    -- Completed published settlements whose centre lies within radius (horizontal)
+    -- of pos, nearest first. Malformed entries are dropped, never repaired.
+    function self:nearby(pos, radius)
+        local a, e = api(); if not a then return nil, e end
+        local good, aerr = self:available(); if not good then return nil, aerr end
+        if type(pos) ~= "table" or type(pos.x) ~= "number" or type(pos.z) ~= "number" then
+            return err("invalid_request", "a horizontal position is required")
+        end
+        local called, list, why, code = pcall(a.settlements, {x = pos.x, z = pos.z}, radius)
+        if not called or type(list) ~= "table" then
+            return err("towns_unavailable", "Towns settlement list is unavailable: " .. tostring(called and (code or why) or list))
+        end
+        local result = {}
+        for _, s in ipairs(list) do
+            if type(s) == "table" and type(s.id) == "string" and s.id ~= "" and well_formed(s) then
+                result[#result + 1] = copy(s)
+            end
+        end
+        return result
     end
 
     -- Normalize one published exit; reject anything the connector cannot honour.
@@ -194,12 +221,16 @@ function adapter.new(get_api, now)
             profile[i] = {y = p.y, name = p.name, param2 = p.param2}
         end
         local r = settlement.reservation
+        -- The source settlement's footprint: the built core plus its outskirts
+        -- structures. The rest of the reservation is an unbuilt belt roads may use.
+        local footprint = {{x1 = settlement.core.x1, z1 = settlement.core.z1, x2 = settlement.core.x2, z2 = settlement.core.z2}}
+        for _, s in ipairs(settlement.structures) do footprint[#footprint + 1] = {x1 = s.x1, z1 = s.z1, x2 = s.x2, z2 = s.z2} end
         return {api_version = SUPPORTED_VERSION, settlement_id = settlement.id, exit_id = found.id,
             source = found.source, direction = {x = d.x, z = d.z},
             anchor = {x = cols[1].x, y = profile[1].y, z = cols[1].z},
             offsets = {min = offsets[1], max = offsets[#offsets]}, length = length, profile = profile,
             columns = copy(cols), center = copy(settlement.center), town_type = settlement.town_type,
-            reservation = {x1 = r.min.x, z1 = r.min.z, x2 = r.max.x, z2 = r.max.z}}
+            reservation = {x1 = r.min.x, z1 = r.min.z, x2 = r.max.x, z2 = r.max.z}, footprint = footprint}
     end
 
     function self:writer()

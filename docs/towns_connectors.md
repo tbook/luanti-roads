@@ -80,7 +80,7 @@ rules; do not add arbitrary stair writes. Reject a site whose seam needs them.
 
 Choose the start natural landing first; it anchors the existing four-node
 lattice. Resolve the goal connector to a natural landing on that same lattice.
-Enumerate bounded candidates deterministically, validate the complete transition,
+Enumerate bounded candidates deterministically, ordered by lateral distance from the strip centre (so the road continues the strip straight when it can), then by distance along, validate the complete transition,
 and report failure when none fit. Never choose a landing and subsequently snap
 it away from the checked transition. Keep the existing 192-node limits for both
 requested and resolved endpoint separation.
