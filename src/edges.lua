@@ -90,16 +90,26 @@ local function validate_preserved(endpoint,c,raw,transition_columns)
     end
     local function get(x,y,z) return raw[x..':'..y..':'..z] end
     local selected=get(ground.x,ground.y,ground.z)
-    if not selected or (selected.name~='mcl_stairs:stair_cobble' and selected.name~='mcl_stairs:slab_cobble') then
-        return nil,'selected shaped node is not preserved'
-    end
     local offset_min,offset_max=0,0
-    for _,sign in ipairs({-1,1}) do for n=1,5 do
-        local off=sign*n; local p=get(ground.x+off*lateral.x,ground.y,ground.z+off*lateral.z)
-        if not p or p.name~=selected.name or p.param2~=selected.param2 then break end
-        offset_min=math.min(offset_min,off); offset_max=math.max(offset_max,off)
-    end end
-    if offset_max-offset_min+1~=c.width then return nil,'preserved strip width differs from path' end
+    if c.origin=='published_exit' then
+        -- A published Towns exit is explicit provenance: use its recorded
+        -- lateral extent instead of the player-selection stair/slab heuristics.
+        local o=c.offsets
+        if type(o)~='table' or not integral_point({x=o.min,y=0,z=o.max}) or o.min>0 or o.max<0
+            or o.max-o.min+1~=c.width then return nil,'preserved strip width differs from path' end
+        if not selected then return nil,'selected shaped node is not preserved' end
+        offset_min,offset_max=o.min,o.max
+    else
+        if not selected or (selected.name~='mcl_stairs:stair_cobble' and selected.name~='mcl_stairs:slab_cobble') then
+            return nil,'selected shaped node is not preserved'
+        end
+        for _,sign in ipairs({-1,1}) do for n=1,5 do
+            local off=sign*n; local p=get(ground.x+off*lateral.x,ground.y,ground.z+off*lateral.z)
+            if not p or p.name~=selected.name or p.param2~=selected.param2 then break end
+            offset_min=math.min(offset_min,off); offset_max=math.max(offset_max,off)
+        end end
+        if offset_max-offset_min+1~=c.width then return nil,'preserved strip width differs from path' end
+    end
     local facedir=direction.x==1 and 1 or direction.x==-1 and 3 or direction.z==1 and 0 or 2
     local previous
     for row=0,#c.path/2-1 do

@@ -317,4 +317,40 @@ test("production VoxeLibre bounds reach survey service and permit padded flat-wo
         and h.survey_args.config.chunk_origin.y==-32)
 end)
 
+test("external holders share the slot without being owned by a player",function()
+    local h=harness()
+    local cancelled_by
+    local holder={kind="outward",cancel=function(actor) cancelled_by=actor; return true end,
+        status=function() return {op_id="op1",stage="surveying"} end}
+    assert(not h.controller:hold({kind="outward"}))
+    local token=assert(h.controller:hold(holder))
+    local again,e=h.controller:hold(holder); assert(not again and e.code=="busy")
+    assert(h.controller:start_endpoint("alice",point(0,.5,0)))
+    local id,err=h.controller:plan("alice",point(8,.5,0),h.config)
+    assert(not id and err.code=="busy")
+    local slot=h.controller:status("alice").slot
+    assert(slot.kind=="outward" and slot.op_id=="op1" and slot.stage=="surveying")
+    local ok,build_err=h.controller:build("alice"); assert(not ok and build_err.code=="not_owner")
+    h.controller:disconnect("alice"); assert(h.controller.active==token)
+    assert(h.controller:cancel("bob") and cancelled_by=="bob" and h.controller.active==token)
+    assert(h.controller:release({}) == false and h.controller.active==token)
+    assert(h.controller:release(token) and not h.controller.active)
+    assert(h.controller:release(token)==false)
+    assert(h.controller:status("alice").slot==nil)
+    assert(h.controller:start_endpoint("alice",point(0,.5,0)))
+    assert(h.controller:plan("alice",point(8,.5,0),h.config))
+end)
+
+test("a manual job or ready plan keeps the slot against external holders",function()
+    local h=harness()
+    h.controller:start_endpoint("alice",point(0,.5,0))
+    assert(h.controller:plan("alice",point(8,.5,0),h.config))
+    local holder={kind="outward",cancel=function() return true end,status=function() return {} end}
+    local token,err=h.controller:hold(holder); assert(not token and err.code=="busy")
+    h.survey.state="succeeded"; h.drain(); assert(h.controller:status("alice").state=="ready")
+    token,err=h.controller:hold(holder); assert(not token and err.code=="busy")
+    assert(h.controller:cancel("alice"))
+    assert(h.controller:hold(holder))
+end)
+
 print("ok - "..count.." route job/command tests")

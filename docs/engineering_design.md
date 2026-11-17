@@ -271,6 +271,12 @@ Incremental surveys will require coordination with town construction and other
 terrain writers: emerge completion alone does not guarantee that deferred mod
 jobs have finished. That coordination is outside this standalone experiment.
 
+## Outward roads from Towns settlements
+
+The optional Towns adapter, the persistent outward-road service, and the
+record contract are specified in `docs/outward_road_service.md`. They reuse
+the survey, planner, composer, and builder modules unchanged in purpose.
+
 ## References
 
 - [Luanti mod structure](https://api.luanti.org/mods/).
