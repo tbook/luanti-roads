@@ -99,8 +99,23 @@ function build.new(plan,ops,done)
     local self={cancelled=false,index=1}
     function self:cancel() self.cancelled=true end
     local function finish(err,metrics) if not self.cancelled then done(err,metrics) end end
+    local tick
     local function final()
         local started=ops.now()
+        -- Optional coordination hook (for example the Towns writer check). It
+        -- runs in the same synchronous callback as the writes. 'defer' reloads
+        -- the blocks later; a failure performs zero writes.
+        if ops.guard then
+            local verdict,why=ops.guard(plan)
+            if verdict=='defer' then
+                self.index=1
+                local ok,err=pcall(ops.after,1,function() if not self.cancelled then tick() end end)
+                if not ok then finish(fail('build_failed','cannot schedule construction: '..tostring(err))) end
+                return
+            elseif verdict~='ok' then
+                return finish(type(why)=='table' and why or fail('build_failed','construction guard rejected the plan'))
+            end
+        end
         -- Snow can melt while a long search runs. A planned clear already
         -- removes the snow, so its disappearance has the same outcome.
         local clears={}
@@ -144,7 +159,7 @@ function build.new(plan,ops,done)
         end
         finish(nil,{writes=count,pause_seconds=ops.now()-started})
     end
-    local function tick()
+    tick=function()
         if self.cancelled then return end
         local stop=math.min(self.index+15,#blocks)
         for i=self.index,stop do

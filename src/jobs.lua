@@ -163,9 +163,29 @@ function jobs.new(ops)
         begin_search(record,result.terrain)
     end
 
+    -- An external holder (the outward-road service) occupies the same global
+    -- slot without being a player-owned record. holder = {kind, cancel(actor),
+    -- status()}; the returned token is passed back to release. Disconnecting
+    -- players never affect it.
+    function self:hold(holder)
+        if type(holder)~="table" or type(holder.cancel)~="function" or type(holder.status)~="function" then
+            return nil,error_result("invalid_config","slot holder is incomplete")
+        end
+        if self.active then return nil,error_result("busy","another road job owns the server slot") end
+        local token={external=true,holder=holder,state="holding"}
+        self.active=token
+        return token
+    end
+
+    function self:release(token)
+        if token and self.active==token then self.active=nil; return true end
+        return false
+    end
+
     function self:cancel(owner)
         local record=self.active
         if not record then return nil,error_result("no_plan","there is no active road plan") end
+        if record.external then return record.holder.cancel(owner) end
         if record.owner~=owner then return nil,error_result("not_owner","only the planning player can cancel this job") end
         finish(record,"cancelled",error_result("cancelled","planning cancelled by owner"))
         return true
@@ -213,7 +233,7 @@ function jobs.new(ops)
 
     function self:disconnect(owner)
         local record=self.active
-        if record and record.owner==owner then
+        if record and not record.external and record.owner==owner then
             cancel_work(record)
             record.closed=true
             self.active=nil
@@ -225,12 +245,18 @@ function jobs.new(ops)
 
     function self:status(owner)
         local record=self.active and self.active.owner==owner and self.active or self.reports[owner]
-        if not record then return {state="idle",owner=owner} end
+        local slot
+        if self.active and self.active.external then
+            local ok,info=pcall(self.active.holder.status)
+            slot=ok and type(info)=="table" and copy(info) or {}
+            slot.kind=slot.kind or self.active.holder.kind
+        end
+        if not record then return {state="idle",owner=owner,slot=slot} end
         local result={id=record.id,owner=record.owner,state=record.state,
             error=copy(record.error),started_at=record.started_at,finished_at=record.finished_at,
             endpoints=copy(record.endpoints),request=copy(record.request),
             requested_endpoints={start=copy(record.start_feet),goal=copy(record.goal_feet)},
-            survey_metrics=copy(record.survey_metrics),search_metrics=copy(record.search_metrics),build_metrics=copy(record.build_metrics)}
+            survey_metrics=copy(record.survey_metrics),search_metrics=copy(record.search_metrics),build_metrics=copy(record.build_metrics),slot=slot}
         if record.route_summary then result.metrics=copy(record.route_summary.metrics); result.cost=record.route_summary.cost end
         return result
     end

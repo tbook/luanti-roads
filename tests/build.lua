@@ -165,3 +165,58 @@ for _,change in ipairs({
     assert(not job and e.code=='build_failed' and #performed==0)
 end
 print('ok - construction scenarios, stale connector checks and version rejection')
+
+-- Optional coordination guard: ok proceeds, fail writes nothing, defer reloads
+-- the blocks and asks again later, and a guard fault is a zero-write failure.
+do
+    local function guarded(verdicts,change)
+        local verdicts_index,loads,delays=0,0,{}
+        local result,metrics
+        local r,m,writes,job,err=scenario(function(plan,ops,w)
+            ops.load=function() loads=loads+1 end
+            local original=ops.after
+            local pending={}
+            ops.after=function(delay,fn) delays[#delays+1]=delay; original(delay,fn) end
+            ops.guard=function(p)
+                assert(p.writes)
+                verdicts_index=verdicts_index+1
+                local v=verdicts[verdicts_index] or verdicts[#verdicts]
+                if type(v)=='function' then return v() end
+                return unpack(v)
+            end
+            if change then change(plan,ops,w) end
+        end)
+        return r,m,writes,loads,delays,verdicts_index
+    end
+    local r,m,writes=guarded({{'ok'}})
+    assert(r=='success' and m.writes==2 and #writes==2)
+    r,m,writes=guarded({{'fail',{code='towns_conflict',reason='settlement'}}})
+    assert(r.code=='towns_conflict' and #writes==0)
+    r,m,writes=guarded({{'bad'}})
+    assert(r.code=='build_failed' and #writes==0)
+    r,m,writes=guarded({function() error('boom') end})
+    assert(r.code=='build_failed' and #writes==0)
+    local loads,delays,calls
+    r,m,writes,loads,delays,calls=guarded({{'defer'},{'defer'},{'ok'}})
+    assert(r=='success' and #writes==2 and calls==3 and loads==6)
+    local ones=0; for _,d in ipairs(delays) do if d==1 then ones=ones+1 end end
+    assert(ones==2)
+    r,m,writes,loads,delays,calls=guarded({{'defer'},{'fail',{code='towns_busy',reason='busy'}}})
+    assert(r.code=='towns_busy' and #writes==0 and calls==2)
+    -- A stale plan is still rejected after the guard passes, with zero writes.
+    r,m,writes=guarded({{'ok'}},function(_,ops) ops.access.is_protected=function() return true end end)
+    assert(r.code=='stale_plan' and #writes==0)
+    -- Cancelling while deferred stops everything.
+    local queue,wrote={},0
+    local plan={version=1,owner='alice',expectations={{x=0,y=0,z=0,kind='natural',material='mcl_core:dirt',protected=false}},
+        writes={{x=0,y=0,z=0,kind='road'}}}
+    local finished
+    local job=assert(build.new(plan,{now=function() return 0 end,after=function(_,fn) queue[#queue+1]=fn end,
+        load=function() end,classify=surface.classify,has_timer=function() return false end,guard=function() return 'defer' end,
+        access={get_node=function() return {name='mcl_core:dirt'} end,has_metadata=function() return false end,
+            is_protected=function() return false end},write=function() wrote=wrote+1 end},function() finished=true end))
+    for _=1,3 do table.remove(queue,1)() end
+    job:cancel(); while #queue>0 do table.remove(queue,1)() end
+    assert(not finished and wrote==0)
+end
+print('ok - construction guard scenarios')

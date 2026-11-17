@@ -232,3 +232,10 @@ Required scenarios:
 - A disposable world reproduces a real Towns ramp, verifies player traversal and
   preview, and compares raw approach/support nodes and metadata before/after build.
   Never perform construction trials in the user's world.
+
+## Published exits (outward roads)
+
+Exits published by the Towns API are resolved without a player by
+`connectors.exit_endpoints`, with `origin="published_exit"` connectors. See
+`docs/outward_road_service.md` for the adapter, service, and record contracts.
+The player-selected stair/slab behaviour above is unchanged.
