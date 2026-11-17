@@ -238,7 +238,19 @@ end
 
 local function landing_options(terrain,c,anchor)
     local result={}
-    for n=c.rows+1,c.rows+8 do for shift=-3,3 do
+    -- Prefer continuing the strip straight: candidates nearest its lateral
+    -- centre first (the same centre outward_policy plans from), then nearest.
+    local centre=math.floor((c.min+c.max)/2+0.5)
+    local order={}
+    for n=c.rows+1,c.rows+8 do for shift=-3,3 do order[#order+1]={n=n,shift=shift} end end
+    table.sort(order,function(a,b)
+        local ka,kb=math.abs(a.shift-centre),math.abs(b.shift-centre)
+        if ka~=kb then return ka<kb end
+        if a.n~=b.n then return a.n<b.n end
+        return a.shift<b.shift
+    end)
+    for _,cand in ipairs(order) do
+        local n,shift=cand.n,cand.shift
         local x=c.selection.x+n*c.direction.x+shift*c.lateral.x
         local z=c.selection.z+n*c.direction.z+shift*c.lateral.z
         if n-c.rows+math.abs(shift)<=8 and (not anchor or ((x-anchor.x)%4==0 and (z-anchor.z)%4==0)) then
@@ -249,7 +261,7 @@ local function landing_options(terrain,c,anchor)
                 if tr then result[#result+1]={landing=landing,transition=tr} end
             end
         end
-    end end
+    end
     return result
 end
 
@@ -371,17 +383,24 @@ local function inside(rect,x,z)
     return type(rect)=='table' and x>=rect.x1 and x<=rect.x2 and z>=rect.z1 and z<=rect.z2
 end
 
+local function inside_any(rects,x,z)
+    if type(rects)~='table' then return false end
+    for _,r in ipairs(rects) do if inside(r,x,z) then return true end end
+    return false
+end
+
 -- Resolve a published exit and a caller-supplied target without any player.
 -- descriptor: see towns_adapter.exit. target is an integer {x,z}. The optional
--- descriptor.reservation rect (x1,z1,x2,z2) keeps goals outside the source
--- settlement. Never emerges or generates terrain.
+-- descriptor.footprint list of rects (x1,z1,x2,z2: the core and outskirts
+-- structures) keeps goals outside the source settlement; the unbuilt
+-- reservation belt around it is allowed. Never emerges or generates terrain.
 function connectors.exit_endpoints(terrain,desc,target,access,load,surface,edges)
     if type(access)~='table' or type(load)~='function' then return fail('connector inspection is unavailable') end
     if not valid_descriptor(desc) then return fail('invalid published exit descriptor') end
     if type(target)~='table' or not integral(target.x) or not integral(target.z) then
         return fail('invalid target position')
     end
-    if inside(desc.reservation,target.x,target.z) then return fail('target inside source settlement') end
+    if inside_any(desc.footprint,target.x,target.z) then return fail('target inside source settlement') end
     local read=reader(terrain,access,load)
     local c,why,where=inspect_exit(read,desc,surface.classify,access)
     if not c then return fail(why,where) end
@@ -402,7 +421,7 @@ function connectors.exit_endpoints(terrain,desc,target,access,load,surface,edges
         local z=start.resolved.z+4*round((goal_feet.z-start.resolved.z)/4)
         local snapped=terrain.get_column(x,z)
         if snapped and snapped.status=='ok' and (goal_feet.x-x)^2+(goal_feet.z-z)^2<=9
-            and math.abs(snapped.ground_y-bg.y)<=2 and not inside(desc.reservation,x,z) then
+            and math.abs(snapped.ground_y-bg.y)<=2 and not inside_any(desc.footprint,x,z) then
             return {{requested=copy(goal_feet),ground=bg,resolved={x=x,y=snapped.ground_y,z=z}}}
         end
         return {}

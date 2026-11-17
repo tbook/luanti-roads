@@ -154,8 +154,8 @@ and the heading-feasibility loop. Factor the matching tail of
   - Snap to the landing lattice with the existing rules: at most 3 nodes
     horizontally and at most 2 nodes of height difference.
   - `planner.new` still checks the full goal cap (`check_goal_cap`).
-  - If the snapped goal lies inside the source settlement's whole
-    `reservation` rect, fail with `invalid_endpoint`, "target inside source
+  - If the snapped goal lies inside the source settlement's footprint (the
+    published `core` and `structures` rects), fail with `invalid_endpoint`, "target inside source
     settlement".
 - **Limits.** The existing 192-node checks apply to requested points (row-0
   sample to target) and to resolved points (landing to snapped goal). Over-limit
@@ -488,7 +488,7 @@ Cases:
   - Composition never writes preserved nodes.
   - The builder rejects a changed exit with zero writes.
 - **Exclusion.** A cheapest route through town cobble or another exit detours.
-  A target inside the reservation is rejected.
+  A target inside the source footprint is rejected.
 - **Budgets.**
   - A second candidate reuses chunks and they are counted once.
   - A candidate that would exceed 96 chunks is skipped and the next one is
@@ -566,8 +566,10 @@ Resolved here with defaults, no input needed:
 
 - Any `server`-privileged player may view or cancel any outward operation.
 - Outward work survives the requester disconnecting.
-- Targets must be outside the source's whole reservation, although the road may
-  cross the unbuilt outskirts belt.
+- Targets must be outside the source settlement's footprint (published `core`
+  and `structures` rects), not its whole reservation: the reservation belt is
+  typically 150-190 nodes deep, which no 64-128 node target could clear. The
+  road and its target may use the unbuilt belt.
 - Outward roads use the conservative protection owner `roads:outward`.
 - Planning interrupted by a restart is retryable.
 - The durability wait adds about 6 s before construction.
@@ -587,8 +589,9 @@ the text above:
 - The adapter is an object: `adapter.new(get_api, now)` with methods
   `settlement`, `exit`, `writer`, `overlay`, `new_guard`, `recheck`, and the
   plain function `adapter.wrap_terrain`. The exit descriptor also carries
-  `columns`, `center`, `town_type`, and `reservation = {x1,z1,x2,z2}`.
-  `connectors.exit_endpoints` uses `reservation` to reject targets and snapped
+  `columns`, `center`, `town_type`, and `reservation = {x1,z1,x2,z2}`
+  and `footprint = {{x1,z1,x2,z2}...}` (the core, then each structure).
+  `connectors.exit_endpoints` uses `footprint` to reject targets and snapped
   goals inside the source settlement.
 - The anchor is `columns[1]` and offsets are computed relative to it, so
   west and north exits may have negative offsets.

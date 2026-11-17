@@ -56,7 +56,9 @@ and never touches the service lifecycle.
    - distance from the nominal landing in **64 to 128** nodes;
    - within **45 degrees** of the exit's outward direction (checked exactly in
      integer arithmetic after rounding);
-   - outside the source settlement's full reservation rectangle;
+   - outside the source settlement's footprint, meaning its published `core` and
+     `structures` rectangles (the unbuilt outskirts belt of the reservation is
+     allowed);
    - requested separation (anchor to target) at most **192** nodes;
    - resolved separation bounded by `distance + 11 + 3 <= 192`. The 11 covers the
      start moving to its landing, and the 3 covers the goal snapping.
@@ -90,7 +92,7 @@ Every failure is a single clear line with a code. Examples:
 | Towns mod absent | `towns_unavailable` | Manual commands are unaffected. |
 | Unsupported `towns_api` version | `towns_unsupported` | |
 | Registry unhealthy | `towns_unavailable` | |
-| Nothing open within 512 nodes | `no_eligible_settlement` | Lists each blocked settlement and its state. |
+| Nothing open within 512 nodes | `no_eligible_settlement` | If none is found nearby, the plain text. If some are found but all are skipped, lists each settlement and why (built road, in progress, unreadable record). |
 | Chosen settlement has no usable exit | `no_usable_exit` | Lists each skipped exit and why. |
 | No seeded target survives the bounds | `no_target` | Reports the settlement and exit. |
 | Operation or slot busy | `busy` | Also when a manual plan holds the slot. |
@@ -171,7 +173,7 @@ interaction) and real VoxeLibre geometry.
   ticket's "report no usable exit rather than scanning". A product decision is
   needed if this should change.
 - **Targets ignore Towns exclusions at selection time.** Only the source's
-  reservation is checked when generating targets. Exclusions, other settlements
+  footprint (core and structures) is checked when generating targets. Exclusions, other settlements
   and the connector's own rules are enforced later by the service's overlay,
   endpoint resolution, and build guard.
 - **Route geometry is a sample, not the connector.** `/roads_status` shows the
@@ -225,7 +227,8 @@ trial has passed.
 **Repeat and restart**
 
 9. Run `/roads_outward` again on the same settlement. It must be refused with
-   `no_eligible_settlement` naming it as reserved. Record the reply.
+   `no_eligible_settlement`, naming the settlement and why it was skipped (for
+   example, that it already has a built outward road). Record the reply.
 10. Restart the server during `surveying` or `building`. After restart,
     `/roads_status` must show the operation as interrupted (with writes
     `none` or `unknown`) and must not replay the build. Record the state. A
@@ -248,3 +251,45 @@ trial has passed.
     width, chosen target, the metrics listed in step 6, the observed stages and
     times, any Luanti log lines starting with `[roads]`, and the server
     save-interval setting. Note anything that differs from this document.
+
+## 7. Trial results
+
+Recorded from one real run. Anything not listed under "Observed" has not been
+run in the engine.
+
+**Observed in Luanti 5.18, 2026-11-17, world Testlandia:**
+
+- An automatic medieval town, `auto:-1:2` (center -326, 2556, town seed
+  718373748), was published by Towns.
+- The first `/roads_outward` selected exit `+x:-273:2554` (wall_gatehouse,
+  width 4, graded cobble/slab profile). It failed with `no_target`, because
+  targets had to lie outside the whole settlement reservation. This was fixed
+  afterwards: targets now have to lie outside the source footprint only (core
+  and structures), as section 2 describes.
+- The second run built a road. The first candidate target (-166, 2482) resolved
+  to (-164, 7, 2483). Metrics: about 144 nodes long, ascent 2, descent 9, turns
+  10, cuts 18, fills 0, max grade 0.25, 691 writes, 2990 expectations, 1154
+  expansions, 18 new chunks, survey 5.9 s, search 8.2 s.
+- The player confirmed that the road looked good and connected to the exit.
+- The road's landing was about 4 to 5 blocks sideways from the gate's centre.
+  The cause is the landing candidate ordering in `connectors.landing_options`.
+  This was fixed after the trial. The fix has not been re-run in the engine.
+- A repeat `/roads_outward` was refused with `no_eligible_settlement`, which
+  confirmed the repeat check. That run used the wording from before the
+  per-reason presentation change, so the new wording has not been seen in the
+  engine.
+- The other published exits got no road, by design: one successful road per
+  settlement.
+
+**Not run in the engine (unit tests only):**
+
+- A flat full-block exit.
+- Blocked-terrain failure.
+- Restart and replay safety.
+- Storage-failure paths.
+- Cancellation.
+
+Pure or scripted unit tests cover parts of these (for example in
+`tests/outward_policy.lua`, `tests/outward_command.lua`, `tests/outward_store.lua`,
+`tests/outward.lua` and `tests/connectors.lua`). They are not evidence of engine
+behaviour.

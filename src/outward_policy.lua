@@ -56,18 +56,22 @@ function policy.within_separation(anchor, nominal, target)
 end
 
 -- Integer candidate check. The nominal landing and target are integers, so
--- the distance and angle tests are exact.
+-- the distance and angle tests are exact. Returns true, or false and the
+-- rejection reason: "outside_bounds" (distance, angle, coordinate or
+-- separation), "in_settlement" or "too_far" (separation limit).
 local function acceptable(desc, nominal, t)
     local vx, vz = t.x - nominal.x, t.z - nominal.z
     local d = desc.direction
     local dot = vx * d.x + vz * d.z
-    if dot <= 0 or 2 * dot * dot < squared(vx, vz) then return false end -- within 45 degrees
+    if dot <= 0 or 2 * dot * dot < squared(vx, vz) then return false, "outside_bounds" end -- within 45 degrees
     local d2 = squared(vx, vz)
-    if d2 < policy.MIN_DISTANCE * policy.MIN_DISTANCE or d2 > policy.MAX_DISTANCE * policy.MAX_DISTANCE then return false end
-    local r = desc.reservation
-    if t.x >= r.x1 and t.x <= r.x2 and t.z >= r.z1 and t.z <= r.z2 then return false end
-    if not integer(t.x) or not integer(t.z) then return false end
-    return policy.within_separation(desc.anchor, nominal, t)
+    if d2 < policy.MIN_DISTANCE * policy.MIN_DISTANCE or d2 > policy.MAX_DISTANCE * policy.MAX_DISTANCE then return false, "outside_bounds" end
+    for _, r in ipairs(desc.footprint or {}) do
+        if t.x >= r.x1 and t.x <= r.x2 and t.z >= r.z1 and t.z <= r.z2 then return false, "in_settlement" end
+    end
+    if not integer(t.x) or not integer(t.z) then return false, "outside_bounds" end
+    if not policy.within_separation(desc.anchor, nominal, t) then return false, "too_far" end
+    return true
 end
 
 -- The planning landing: the first node the connector may resolve to, one step
@@ -92,6 +96,15 @@ local function seed_text(seed)
     if type(seed) ~= "string" or seed == "" or #seed > SEED_MAX_LENGTH or seed:find("|", 1, true) then return nil end
     return seed
 end
+
+-- Why a nearby settlement was skipped at settlement level, as a phrase that
+-- follows the settlement id. Exit-scoped states never reach this table: the
+-- settlement-level query does not report them (they surface as no_usable_exit).
+local BLOCKED_REASON = {
+    reserved = "already has a built outward road",
+    active = "already has an outward road in progress",
+    unreadable = "has an unreadable outward record and is not usable",
+}
 
 local function by_identity(a, b)
     if a.d2 ~= b.d2 then return a.d2 < b.d2 end
@@ -147,11 +160,17 @@ function policy.select(input)
     for _, entry in ipairs(ranked) do
         local state = input.eligibility(entry.id)
         if state == "open" then chosen = entry; break end
-        blocked[#blocked + 1] = {settlement_id = entry.id, state = tostring(state)}
+        blocked[#blocked + 1] = {settlement_id = entry.id, state = tostring(state),
+            reason = BLOCKED_REASON[state] or "is not usable"}
     end
     if not chosen then
+        if #ranked == 0 then
+            return err("no_eligible_settlement", "no completed settlement within " .. policy.RADIUS .. " nodes",
+                {considered = 0, blocked = blocked, radius = policy.RADIUS})
+        end
         return err("no_eligible_settlement", "no completed settlement within " .. policy.RADIUS
-            .. " nodes is open for an outward road", {considered = #ranked, blocked = blocked, radius = policy.RADIUS})
+            .. " nodes is open for an outward road: " .. #ranked .. " found, none open",
+            {considered = #ranked, blocked = blocked, radius = policy.RADIUS})
     end
 
     -- Exits in stable order; the first one the service reports open is used.
@@ -184,6 +203,7 @@ function policy.select(input)
     local d = descriptor.direction
     local lateral = {x = -d.z, z = d.x}
     local targets, draws = {}, 0
+    local rejected = {outside_bounds = 0, in_settlement = 0, too_far = 0, duplicate = 0}
     while #targets < count and draws < DRAW_LIMIT do
         draws = draws + 1
         local distance = policy.MIN_DISTANCE + unit() * (policy.MAX_DISTANCE - policy.MIN_DISTANCE)
@@ -195,12 +215,19 @@ function policy.select(input)
         for _, existing in ipairs(targets) do
             if existing.x == t.x and existing.z == t.z then duplicate = true end
         end
-        if not duplicate and acceptable(descriptor, nominal, t) then targets[#targets + 1] = t end
+        if duplicate then
+            rejected.duplicate = rejected.duplicate + 1
+        else
+            local ok, why = acceptable(descriptor, nominal, t)
+            if ok then targets[#targets + 1] = t else rejected[why] = rejected[why] + 1 end
+        end
     end
     if #targets == 0 then
         return err("no_target", "no seeded target within " .. policy.MIN_DISTANCE .. "-" .. policy.MAX_DISTANCE
-            .. " nodes of the exit's landing satisfied the bounds",
-            {settlement_id = chosen.id, exit_id = exit_id, draws = draws})
+            .. " nodes of the exit's landing satisfied the bounds (" .. draws .. " draws: "
+            .. rejected.outside_bounds .. " outside bounds, " .. rejected.in_settlement .. " inside the source settlement, "
+            .. rejected.too_far .. " too far, " .. rejected.duplicate .. " duplicate)",
+            {settlement_id = chosen.id, exit_id = exit_id, draws = draws, rejected = rejected})
     end
 
     local settlement_distance = math.sqrt(chosen.d2)

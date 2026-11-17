@@ -224,7 +224,8 @@ test('a request names settlement, exit and targets; status shows live stage and 
     assert(msg:find('Road to (', 1, true) and msg:find('length 20.0', 1, true), msg)
     -- Built reserves the whole settlement: a repeat is refused with the reason, not a silent retry.
     ok, msg = h.run_cmd('roads_outward')
-    assert(not ok and msg:find('no_eligible_settlement', 1, true) and msg:find(SID..' is reserved', 1, true), msg)
+    assert(not ok and msg:find('no_eligible_settlement', 1, true), msg)
+    assert(msg:find('1 found, none open', 1, true) and msg:find(SID..' already has a built outward road.', 1, true), msg)
     assert(h.storage.sets > 0 and h.service.active == nil and h.controller.active == nil)
 end)
 
@@ -254,6 +255,7 @@ test('a request far from every settlement reports no eligible settlement with th
     h.pos = {x = 5000, y = 0, z = 0}
     local ok, msg = h.run_cmd('roads_outward')
     assert(not ok and msg:find('no_eligible_settlement', 1, true) and msg:find('512', 1, true), msg)
+    assert(msg == 'no_eligible_settlement: no completed settlement within 512 nodes.', msg)
     assert(h.storage.sets == 0 and h.service.active == nil)
 end)
 

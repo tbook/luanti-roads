@@ -221,12 +221,16 @@ function adapter.new(get_api, now)
             profile[i] = {y = p.y, name = p.name, param2 = p.param2}
         end
         local r = settlement.reservation
+        -- The source settlement's footprint: the built core plus its outskirts
+        -- structures. The rest of the reservation is an unbuilt belt roads may use.
+        local footprint = {{x1 = settlement.core.x1, z1 = settlement.core.z1, x2 = settlement.core.x2, z2 = settlement.core.z2}}
+        for _, s in ipairs(settlement.structures) do footprint[#footprint + 1] = {x1 = s.x1, z1 = s.z1, x2 = s.x2, z2 = s.z2} end
         return {api_version = SUPPORTED_VERSION, settlement_id = settlement.id, exit_id = found.id,
             source = found.source, direction = {x = d.x, z = d.z},
             anchor = {x = cols[1].x, y = profile[1].y, z = cols[1].z},
             offsets = {min = offsets[1], max = offsets[#offsets]}, length = length, profile = profile,
             columns = copy(cols), center = copy(settlement.center), town_type = settlement.town_type,
-            reservation = {x1 = r.min.x, z1 = r.min.z, x2 = r.max.x, z2 = r.max.z}}
+            reservation = {x1 = r.min.x, z1 = r.min.z, x2 = r.max.x, z2 = r.max.z}, footprint = footprint}
     end
 
     function self:writer()

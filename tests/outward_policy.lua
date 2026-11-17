@@ -29,6 +29,8 @@ local function town(id, cx, cz, exits, half)
     s.center = {x=cx, y=1, z=cz}
     half = half or 40
     s.reservation = {min={x=cx-half, y=-10, z=cz-half}, max={x=cx+half, y=40, z=cz+half}}
+    -- The built footprint fills the reservation here, so nothing may land inside it.
+    s.core = {x1=cx-half, z1=cz-half, x2=cx+half, z2=cz+half}; s.structures = {}
     return s
 end
 
@@ -84,6 +86,8 @@ test('radius is horizontal and inclusive at 512 nodes', function()
     assert(chosen.settlement_id == 'auto:9:0')
     local none, err = policy.select(request({beyond, diagonal}))
     assert(not none and err.code == 'no_eligible_settlement' and err.considered == 0 and err.radius == 512)
+    assert(err.reason == 'no completed settlement within 512 nodes', err.reason) -- none nearby: plain text
+    assert(#err.blocked == 0)
     -- The requester position is what counts, not the settlement's y value.
     edge.center.y = -900
     assert(policy.select(request({edge})).settlement_id == 'auto:9:0')
@@ -98,6 +102,14 @@ test('reserved, unreadable and busy settlements are excluded and reported', func
     assert(not none and err.code == 'no_eligible_settlement' and err.considered == 3)
     assert(#err.blocked == 3 and err.blocked[1].settlement_id == 'auto:0:1' and err.blocked[1].state == 'unreadable')
     assert(err.blocked[2].state == 'reserved' and err.blocked[3].state == 'active')
+    -- Each skipped settlement carries its own reason; the summary counts what was found.
+    assert(err.blocked[1].reason == 'has an unreadable outward record and is not usable', err.blocked[1].reason)
+    assert(err.blocked[2].reason == 'already has a built outward road', err.blocked[2].reason)
+    assert(err.blocked[3].reason == 'already has an outward road in progress', err.blocked[3].reason)
+    assert(err.reason:find('3 found, none open', 1, true), err.reason)
+    -- An unrecognised state is reported as not usable rather than hidden.
+    none, err = policy.select(request({a}, {eligibility = states({['auto:1:0'] = 'mystery'})}))
+    assert(not none and err.blocked[1].state == 'mystery' and err.blocked[1].reason == 'is not usable')
 end)
 
 test('exits are chosen in stable order; reserved and unsupported exits are skipped', function()
@@ -239,11 +251,45 @@ test('realistic 64-bit mapgen seeds are kept as text and give reproducible targe
     end
 end)
 
-test('no candidate inside the source reservation or outside the bounds yields no_target', function()
+test('no candidate inside the source settlement or outside the bounds yields no_target', function()
     local s = town('auto:4:4', 120, 0, {placed_exit({x=1, z=0}, 'flat', 2, 160, 0)}, 1000)
     local r, e = policy.select(request({s}))
     assert(not r and e.code == 'no_target' and e.settlement_id == 'auto:4:4' and e.exit_id == '+x:160:0')
     assert(e.draws == 64)
+    local n = e.rejected
+    assert(n.outside_bounds + n.in_settlement + n.too_far + n.duplicate == 64 and n.in_settlement > 0)
+    assert(e.reason:find('inside the source settlement', 1, true))
+end)
+
+test('real Testlandia settlement: targets may lie in the outskirts belt outside the footprint', function()
+    local e = placed_exit({x=1, z=0}, 'flat', 4, -273, 2554)
+    while #e.profile > 4 do table.remove(e.profile) end; e.length = 4 -- the real exit is 4 long
+    assert(e.id == '+x:-273:2554')
+    local s = town('auto:-1:2', -326, 2556, {e}, 245)
+    s.center.y = 15
+    s.reservation = {min={x=-571, y=-112, z=2311}, max={x=-81, y=157, z=2801}}
+    s.core = {x1=-431, z1=2423, x2=-279, z2=2634}
+    s.structures = {{x1=-282, z1=2548, x2=-274, z2=2563}, {x1=-268, z1=2530, x2=-256, z2=2546},
+        {x1=-269, z1=2457, x2=-257, z2=2473}, {x1=-248, z1=2601, x2=-241, z2=2609}, {x1=-283, z1=2630, x2=-276, z2=2637}}
+    local r, err = policy.select(request({s}, {requester = {x = -326, z = 2556}}))
+    assert(r, err and (err.code .. ': ' .. tostring(err.reason) .. tostring(err.skipped and err.skipped[1].reason)))
+    assert(r.nominal.x == -268 and r.nominal.z == 2556)
+    assert(#r.candidates >= 1)
+    local res = r.descriptor.reservation
+    for _, t in ipairs(r.candidates) do
+        assert(t.x >= res.x1 and t.x <= res.x2 and t.z >= res.z1 and t.z <= res.z2, 'inside the belt')
+        for _, f in ipairs(r.descriptor.footprint) do
+            assert(not (t.x >= f.x1 and t.x <= f.x2 and t.z >= f.z1 and t.z <= f.z2), 'outside the footprint')
+        end
+    end
+    -- The landing and the first connector steps are not inside any footprint rect.
+    for x = -273, -264 do
+        for z = 2554, 2557 do
+            for _, f in ipairs(r.descriptor.footprint) do
+                assert(not (x >= f.x1 and x <= f.x2 and z >= f.z1 and z <= f.z2), 'landing ' .. x .. ',' .. z)
+            end
+        end
+    end
 end)
 
 test('separation limit is exact and rejects rather than clamps', function()

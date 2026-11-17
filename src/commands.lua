@@ -118,7 +118,7 @@ local function failure(e)
     local text=table.concat(parts," ")
     if text:sub(-1)~="." then text=text.."." end
     for _,b in ipairs(type(e.blocked)=="table" and e.blocked or {}) do
-        text=text.." "..tostring(b.settlement_id).." is "..tostring(b.state).."."
+        text=text.." "..tostring(b.settlement_id).." "..(b.reason or ("is "..tostring(b.state))).."."
     end
     for _,s in ipairs(type(e.skipped)=="table" and e.skipped or {}) do
         text=text.." Exit "..tostring(s.exit_id).." is "..tostring(s.state)..(s.reason and (" ("..s.reason..")") or "").."."

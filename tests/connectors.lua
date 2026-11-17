@@ -163,9 +163,38 @@ test('published flat and graded exits resolve in every direction and width',func
                 assert(p.goal.connector==nil and p.goal.requested.y==p.goal.ground.y+0.5)
                 local along=(p.start.resolved.x*d.x+p.start.resolved.z*d.z)
                 assert(along>desc.length)
+                -- The road continues the strip straight: it lands on its lateral centre.
+                local centre=math.floor((desc.offsets.min+desc.offsets.max)/2+0.5)
+                local l=p.start.resolved
+                assert(l.x*-d.z+l.z*d.x==centre,('%d,%d %s w%d lateral %d'):format(d.x,d.z,kind,width,l.x*-d.z+l.z*d.x))
+                assert(along==desc.length+1)
             end
         end
     end
+end)
+test('published exit lands on the strip centre for the real Testlandia width-4 exit',function()
+    local ox,oz=-273,2554
+    local profile={{y=15,name='mcl_core:cobble',param2=0},{y=15,name='mcl_core:cobble',param2=0},
+        {y=15,name='mcl_stairs:slab_cobble',param2=0},{y=14,name='mcl_core:cobble',param2=0}}
+    local function node(x,y,z)
+        local n=x-ox
+        if n>=0 and n<4 and z>=oz and z<=oz+3 then
+            local e=profile[n+1]
+            if y==e.y then return {name=e.name,param2=e.param2} end
+            if y<e.y then return {name='mcl_core:stone',param2=0} end
+            return {name='air',param2=0}
+        end
+        return {name=y<=14 and 'mcl_core:stone' or 'air',param2=0}
+    end
+    local access={get_node=function(p) return node(p.x,p.y,p.z) end,has_metadata=function() return false end,
+        is_protected=function() return false end,get_natural_light=function() return 15 end}
+    local desc={api_version=1,settlement_id='auto:-1:2',exit_id='+x:-273:2554',source='street',
+        direction={x=1,z=0},anchor={x=ox,y=15,z=oz},offsets={min=0,max=3},length=4,profile=profile}
+    local terrain=assert(surface.inspect({min_x=-288,max_x=-177,min_y=0,max_y=31,min_z=2544,max_z=2575},'roads:outward',access))
+    local p,err=connectors.exit_endpoints(terrain,desc,{x=ox+80,z=oz+2},access,function() end,surface,edges)
+    assert(p,err and err.reason)
+    -- Not the old edge-relative z=2551; the policy's nominal landing is (-268,2556).
+    assert(p.start.resolved.x==-268 and p.start.resolved.z==2556,p.start.resolved.x..','..p.start.resolved.z)
 end)
 test('published exit plans, composes and preserves approach nodes',function()
     local build=dofile('src/build.lua')
@@ -242,10 +271,10 @@ test('published exit accepts lateral neighbour cobble that a player selection re
     local r,e=connectors.endpoints(terrain,feet,{x=20.75,y=2.5,z=0},access,function() end,surface,edges)
     assert(not r and e.code=='invalid_endpoint')
 end)
-test('published exit targets are bounded and kept outside the source reservation',function()
+test('published exit targets are bounded and kept outside the source footprint',function()
     local p,err=exit_resolve({x=1,z=0,p2=1},'flat',2,nil,nil,function(t) t.x=300 end)
     assert(not p and err.code=='invalid_endpoint')
-    p,err=exit_resolve({x=1,z=0,p2=1},'flat',2,nil,function(desc) desc.reservation={x1=10,z1=-10,x2=40,z2=10} end)
+    p,err=exit_resolve({x=1,z=0,p2=1},'flat',2,nil,function(desc) desc.footprint={{x1=10,z1=-10,x2=40,z2=10}} end)
     assert(not p and err.reason:find('inside source settlement'))
     p,err=exit_resolve({x=1,z=0,p2=1},'flat',2,nil,nil,function(t) t.x=1.5 end)
     assert(not p and err.code=='invalid_endpoint')
