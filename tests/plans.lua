@@ -126,4 +126,80 @@ test('interned material identity is retained and mismatches fail', function()
     local _,err=plans.compose(t,result.route,{road_material=other})
     assert(err.code=='invalid_config')
 end)
+test('connector reserves its approach and composes exact expectations', function()
+    local t=fixture.rectangle(-12,24,-12,12,0)
+    local a,b={x=0,y=0,z=0},{x=8,y=0,z=0}
+    local req=request(a,b)
+    local c={version=1,landing={x=0,y=0,z=0},direction={x=1,z=0},width=2,
+        path={{x=-4.25,y=0,z=0},{x=-3.75,y=0,z=0}},preserved={},
+        transition={surfaces={},writes={},expectations={}}}
+    for z=0,1 do for y=-1,3 do
+        c.preserved[#c.preserved+1]={x=-4,y=y,z=z,
+            name=y==-1 and 'mcl_core:stone' or y==0 and 'mcl_stairs:slab_cobble' or 'air',
+            param2=0,has_metadata=false,protected=false}
+    end end
+    for x=-3,1 do for z=-1,1 do
+        local tr=c.transition
+        tr.surfaces[#tr.surfaces+1]={x=x,y=0,z=z}
+        tr.writes[#tr.writes+1]={x=x,y=0,z=z,kind='road'}
+        for y=-1,3 do tr.expectations[#tr.expectations+1]={x=x,y=y,z=z,kind=y<=0 and 'natural' or 'air',material=y<=0 and 'stone' or nil,protected=false} end
+    end end
+    req.provenance.start.connector=c
+    req.provenance.start.ground={x=-4,y=0,z=0}
+    req.provenance.start.requested={x=-4.25,y=0,z=0}
+    local constraints=assert(edges.connector_constraints(req.provenance))
+    assert(not edges.evaluate(t,a,{i=0,j=0},4,{road_material='cobble',constraints=constraints}).ok)
+    assert(edges.evaluate(t,a,{i=0,j=0},0,{road_material='cobble',constraints=constraints}).ok)
+    -- A later diagonal must account for its full support footprint, even away
+    -- from either endpoint and even though the contact is read-only.
+    c.preserved[#c.preserved+1]={x=7,y=-1,z=3,name='mcl_core:stone',param2=0,has_metadata=false,protected=false}
+    constraints=assert(edges.connector_constraints(req.provenance))
+    local diagonal=edges.evaluate(t,a,{i=1,j=0},1,{road_material='cobble',constraints=constraints})
+    assert(not diagonal.ok and diagonal.code=='connector')
+    local s=assert(planner.new(t,req,{road_material='cobble'}))
+    local result=s:step({max_expansions=1000}); assert(result.status=='succeeded')
+    local plan=assert(plans.compose(t,result.route,{road_material='cobble'}))
+    assert(plan.version==2 and plan.connector_version==1)
+    assert(lookup(plan.expectations,-4,0,0).name=='mcl_stairs:slab_cobble')
+    assert(not lookup(plan.writes,-4,0,0) and lookup(plan.writes,-3,0,0))
+    local detour=request(a,{x=16,y=0,z=0})
+    detour.provenance.start=req.provenance.start
+    c.preserved[#c.preserved+1]={x=8,y=-1,z=0,name='mcl_core:stone',param2=0,has_metadata=false,protected=false}
+    local search=assert(planner.new(t,detour,{road_material='cobble'}))
+    local alternative=search:step({max_expansions=1000})
+    while alternative.status=='running' do alternative=search:step({max_expansions=1000}) end
+    assert(alternative.status=='succeeded',alternative.error and alternative.error.reason)
+    local bent=false
+    for _,point in ipairs(alternative.route.centerline) do if point.z~=0 then bent=true end end
+    assert(bent,'route must detour around preserved support')
+    assert(plans.compose(t,alternative.route,{road_material='cobble'}))
+    for _,position in ipairs({{-4,0,0},{-4,-1,1},{-4,3,1}}) do
+        local p=lookup(c.preserved,position[1],position[2],position[3]); local old=p.x
+        p.x=old-6
+        local accepted=edges.connector_constraints(req.provenance)
+        assert(not accepted, 'missing preserved surface, support or clearance must be rejected')
+        p.x=old
+    end
+    local seam=lookup(c.transition.surfaces,-3,0,1); seam.z=8
+    assert(not edges.connector_constraints(req.provenance), 'incomplete width seam must be rejected')
+    seam.z=1
+    seam.y=1
+    assert(not edges.connector_constraints(req.provenance), 'one-node transition step must be rejected')
+    seam.y=0
+    local cap_write=lookup(c.transition.writes,-1,0,0)
+    cap_write.kind='air'
+    local broken=assert(edges.connector_constraints(req.provenance))
+    assert(not edges.evaluate(t,a,{i=0,j=0},0,{road_material='cobble',constraints=broken}).ok,
+        'landing cap operation mismatch must reject the edge')
+    cap_write.kind='road'
+    c.path[1].x=-8
+    result.route.request.provenance.start.connector=c
+    local _,seam_error=plans.compose(t,result.route,{road_material='cobble'})
+    assert(seam_error and seam_error.code=='invalid_endpoint')
+    c.path[1].x=-4.25
+    c.transition.writes[1].kind='air'
+    result.route.request.provenance.start.connector=c
+    local _,err=plans.compose(t,result.route,{road_material='cobble'})
+    assert(err and err.code=='composition_failed')
+end)
 print('ok - '..count..' complete-plan tests')

@@ -38,9 +38,9 @@ function plans.compose(terrain, route, config)
         return fail('invalid_config', 'dependencies, terrain, and road_material are required')
     end
     local cap = config.max_writes
-    if cap == nil then cap = 50000 end
-    if not integer(cap) or cap < 1 or cap > 50000 then
-        return fail('invalid_config', 'max_writes must be an integer between 1 and 50000')
+    if cap == nil then cap = 10000 end
+    if not integer(cap) or cap < 1 or cap > 10000 then
+        return fail('invalid_config', 'max_writes must be an integer between 1 and 10000')
     end
     if type(route) ~= 'table' or type(route.centerline) ~= 'table' or #route.centerline < 2
         or type(route.headings) ~= 'table' or #route.headings ~= #route.centerline - 1
@@ -62,6 +62,13 @@ function plans.compose(terrain, route, config)
     end
     local a,b = request.start,request.goal
     local pa,pb = request.provenance.start,request.provenance.goal
+    local constraints, has_connector
+    has_connector=pa.connector or pb.connector
+    if has_connector then
+        if type(edges.connector_constraints)~='function' then return fail('invalid_config','connector constraints unavailable') end
+        local why; constraints,why=edges.connector_constraints(request.provenance)
+        if not constraints then return fail('invalid_endpoint',why) end
+    end
     local function valid_endpoint(p)
         return p.ground.x == math.floor(p.requested.x+0.5)
             and p.ground.z == math.floor(p.requested.z+0.5)
@@ -69,16 +76,19 @@ function plans.compose(terrain, route, config)
     end
     local dx,dz = b.x-a.x,b.z-a.z
     local rdx,rdz = pb.requested.x-pa.requested.x,pb.requested.z-pa.requested.z
-    if not valid_endpoint(pa) or not valid_endpoint(pb) or not same(pa.ground,a)
+    if not valid_endpoint(pa) or not valid_endpoint(pb) or (not pa.connector and not same(pa.ground,a))
         or (dx==0 and dz==0) or dx%4~=0 or dz%4~=0 or dx*dx+dz*dz>192*192
         or rdx*rdx+rdz*rdz>192*192
-        or b.x~=a.x+4*math.floor((pb.requested.x-a.x)/4+0.5)
+        or (not pb.connector and (b.x~=a.x+4*math.floor((pb.requested.x-a.x)/4+0.5)
         or b.z~=a.z+4*math.floor((pb.requested.z-a.z)/4+0.5)
         or (pb.requested.x-b.x)^2+(pb.requested.z-b.z)^2>9
-        or math.abs(pb.ground.y-b.y)>2 then
+        or math.abs(pb.ground.y-b.y)>2)) then
         return fail('invalid_endpoint', 'endpoint provenance is inconsistent')
     end
-    for _,p in ipairs({a,b,pa.ground,pb.ground}) do
+    local checked={a,b}
+    if not pa.connector then checked[#checked+1]=pa.ground end
+    if not pb.connector then checked[#checked+1]=pb.ground end
+    for _,p in ipairs(checked) do
         local ok,c = pcall(terrain.get_column,p.x,p.z)
         if not ok or type(c)~='table' or c.status~='ok' or c.ground_y~=p.y then
             return fail('invalid_endpoint', 'endpoint does not match surveyed ground', copy(p))
@@ -100,7 +110,7 @@ function plans.compose(terrain, route, config)
         end
         local state = {i=(a.x-anchor.x)/4, j=(a.z-anchor.z)/4, heading=route.headings[i-1]}
         local edge = edges.evaluate(terrain, anchor, state, h,
-            {weights=route.parameters.weights, road_material=config.road_material})
+            {weights=route.parameters.weights, road_material=config.road_material, constraints=constraints})
         if not edge.ok then return fail('composition_failed', 'edge rejected: '..tostring(edge.code)..': '..tostring(edge.reason), edge.position) end
         local ca, cb = terrain.get_column(a.x,a.z), terrain.get_column(b.x,b.z)
         if ca.ground_y ~= a.y or cb.ground_y ~= b.y then
@@ -120,6 +130,20 @@ function plans.compose(terrain, route, config)
                     return fail('composition_failed', 'surface allocation limit reached', copy(p), {limit=50000, observed=#surface_list+1})
                 end
                 local q = copy(p); surfaces[id] = q; surface_list[#surface_list+1] = q
+            end
+        end
+    end
+    for _,endpoint in ipairs({pa,pb}) do
+        if endpoint.connector then
+            local ok,err=edges.check_surfaces(terrain,endpoint.connector.transition.surfaces,config.road_material)
+            if not ok then return fail('composition_failed','transition rejected: '..tostring(err.reason),err.position) end
+            for _,p in ipairs(endpoint.connector.transition.surfaces) do
+                local id=key(p.x,p.z); local old=surfaces[id]
+                if old and old.y~=p.y then return fail('composition_failed','transition surface conflicts with road',p) end
+                if not old then
+                    if #surface_list>=50000 then return fail('composition_failed','surface allocation limit reached',p) end
+                    local q=copy(p); surfaces[id]=q; surface_list[#surface_list+1]=q
+                end
             end
         end
     end
@@ -149,12 +173,16 @@ function plans.compose(terrain, route, config)
     end
     for _,p in ipairs(surface_list) do
         local col = terrain.get_column(p.x,p.z)
+        if type(col)~='table' or col.status~='ok' then return fail('composition_failed','transition terrain unavailable',p) end
         local g,r = col.ground_y,p.y
         local first = r <= g and r-1 or g
         local last = r+3
         for y=first,last do
             local entry = col.band[y-g]
             if type(entry) ~= 'table' then return fail('composition_failed', 'missing semantic expectation', {x=p.x,y=y,z=p.z}) end
+            if constraints and constraints.preserved[p.x..':'..y..':'..p.z] then
+                return fail('composition_failed','operation intersects preserved connector',{x=p.x,y=y,z=p.z})
+            end
             expect(p,y,entry)
             local kind,material
             if y==r then kind='road'
@@ -165,6 +193,49 @@ function plans.compose(terrain, route, config)
             end
         end
     end
+    if has_connector then
+        local function k(p) return p.x..':'..p.y..':'..p.z end
+        local expected, written = {}, {}
+        for _,p in ipairs(expectations) do expected[k(p)]=p end
+        for _,p in ipairs(writes) do written[k(p)]=p end
+        for _,endpoint in ipairs({pa,pb}) do
+            local c=endpoint.connector
+            if c then
+                local columns, recorded_expectations, recorded_writes = {}, {}, {}
+                for _,p in ipairs(c.transition.surfaces) do columns[key(p.x,p.z)]=true end
+                for _,p in ipairs(c.transition.expectations) do recorded_expectations[k(p)]=p end
+                for _,p in ipairs(c.transition.writes) do recorded_writes[k(p)]=p end
+                for _,name in ipairs({'expectations','writes'}) do
+                    local map=name=='writes' and written or expected
+                    for _,p in ipairs(c.transition[name]) do
+                        local q=map[k(p)]
+                        if not q or q.kind~=p.kind or q.material~=p.material
+                            or (name=='expectations' and q.protected~=p.protected) then
+                            return fail('composition_failed','transition operation differs from surveyed terrain',p)
+                        end
+                    end
+                end
+                for _,p in ipairs(expectations) do
+                    if columns[key(p.x,p.z)] and not recorded_expectations[k(p)] then
+                        return fail('composition_failed','transition expectation is missing',p)
+                    end
+                end
+                for _,p in ipairs(writes) do
+                    if columns[key(p.x,p.z)] and not recorded_writes[k(p)] then
+                        return fail('composition_failed','transition write is missing',p)
+                    end
+                end
+                for _,p in ipairs(c.preserved) do
+                    local old=expected[k(p)]
+                    if old then
+                        if old.name~=p.name or old.param2~=p.param2 or old.has_metadata~=p.has_metadata
+                            or old.protected~=p.protected then return fail('composition_failed','preserved expectations conflict',p) end
+                    else local q=copy(p); expectations[#expectations+1]=q; expected[k(p)]=q end
+                end
+            end
+        end
+    end
+    if #expectations>50000 then return fail('composition_failed','expectation allocation limit reached',nil,{limit=50000,observed=#expectations}) end
     table.sort(writes,sort_nodes); table.sort(expectations,sort_nodes)
     counts.write_count = #writes
     local metrics = copy(route.metrics)
@@ -174,7 +245,7 @@ function plans.compose(terrain, route, config)
         if k ~= "road_material" then parameters[k] = copy(v) end
     end
     parameters.road_material = config.road_material
-    return {version=1, planner_version=1, raster_version=1, owner=terrain.owner,
+    return {version=has_connector and 2 or 1, connector_version=has_connector and 1 or nil, planner_version=1, raster_version=1, owner=terrain.owner,
         request=copy(request), endpoints=copy(request.provenance), survey_bounds=copy(terrain.bounds),
         centerline=copy(route.centerline), headings=copy(route.headings), parameters=parameters,
         cost=route.cost, metrics=metrics, writes=writes, expectations=expectations}

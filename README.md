@@ -29,9 +29,10 @@ Villages are not required.
 
 All commands require the server privilege. Use `/roads_start` at the first
 endpoint, travel to the destination, then use `/roads_plan`. Check progress and
-the resolved endpoints with `/roads_status`; `/roads_cancel` cancels active
-work or releases a completed, unbuilt plan. `/roads_preview` shows bright
-markers above the route to its owner for 30 seconds. Preview requests are limited
+the selected endpoints, natural landings, and any connector lengths with
+`/roads_status`; `/roads_cancel` cancels active work or releases a completed,
+unbuilt plan. `/roads_preview` shows the route and any preserved Towns walking
+path and paved transition in separate colors to its owner for 30 seconds. Preview requests are limited
 to one every eight seconds. Only one
 survey or ready plan can hold the server slot at a time. Use `/roads_build` to
 construct your ready plan. The mod checks terrain and protection again before

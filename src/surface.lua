@@ -138,6 +138,7 @@ local function ground(snapshot, feet)
     if walkable_leaves[col.band[1].material] then return nil end
     return {x=x,y=col.ground_y,z=z}
 end
+surface.ground = ground
 function surface.endpoints(snapshot, first, second)
     local a,b = ground(snapshot,first),ground(snapshot,second)
     if not a or not b or distance(first, second) > 192 then return error_result("invalid_endpoint", "invalid requested ground") end

@@ -9,6 +9,7 @@ local planner=load("src/planner.lua")
 local plans=load("src/plans.lua")
 local survey=load("src/survey.lua")
 local surface=load("src/surface.lua")
+local connectors=load("src/connectors.lua")
 local survey_job=load("src/survey_job.lua")
 local voxelibre=load("src/voxelibre.lua")
 local lifecycle=load("src/jobs.lua")
@@ -46,7 +47,10 @@ local ops={now=now,after=function(delay,fn) core.after(delay,fn) end,
                 memory=core.EMERGE_FROM_MEMORY,disk=core.EMERGE_FROM_DISK,generated=core.EMERGE_GENERATED},
         },a,b,owner,config)
     end,
-    resolve_endpoints=function(terrain,first,second) return surface.endpoints(terrain,first,second) end,
+    resolve_endpoints=function(terrain,first,second)
+        return connectors.endpoints(terrain,first,second,access,
+            function(minp,maxp) return core.load_area(minp,maxp) end,surface,edges)
+    end,
     new_planner=function(terrain,request,config)
         local planner_config={weights=config.weights,road_material=config.road_material}
         return planner.new(terrain,request,planner_config)

@@ -60,6 +60,224 @@ local function node(column, y)
     return entry
 end
 
+local function id3(p) return p.x .. ':' .. p.y .. ':' .. p.z end
+local function id2(p) return p.x .. ':' .. p.z end
+local function integral_point(p)
+    return type(p)=='table' and finite(p.x) and p.x==math.floor(p.x)
+        and finite(p.y) and p.y==math.floor(p.y) and finite(p.z) and p.z==math.floor(p.z)
+end
+
+-- Validate the raw expectations against the physical path, not just against
+-- one another. These are the full-block supports understood by the survey.
+local natural_support={}
+for _,name in ipairs({'stone','dirt','dirt_with_grass','dirt_with_grass_snow','podzol','redsand','sand',
+    'gravel','clay','sandstone','granite','andesite','diorite','snowblock',
+    'stone_with_coal','stone_with_iron','stone_with_gold','stone_with_redstone',
+    'stone_with_redstone_lit','stone_with_lapis','stone_with_emerald','stone_with_diamond'}) do
+    natural_support['mcl_core:'..name]=true
+end
+natural_support['mcl_copper:stone_with_copper']=true
+local function validate_preserved(endpoint,c,raw,transition_columns)
+    local direction=c.direction
+    if #c.path%2~=0 then return nil,'walking path has incomplete rows' end
+    local lateral={x=-direction.z,z=direction.x}
+    local requested=endpoint.requested
+    if type(requested)~='table' or not finite(requested.x) or not finite(requested.y) or not finite(requested.z)
+        or not integral_point(endpoint.ground) then return nil,'invalid selected connector ground' end
+    local ground=endpoint.ground
+    if ground.x~=math.floor(requested.x+0.5) or ground.z~=math.floor(requested.z+0.5) then
+        return nil,'connector selection does not match ground'
+    end
+    local function get(x,y,z) return raw[x..':'..y..':'..z] end
+    local selected=get(ground.x,ground.y,ground.z)
+    if not selected or (selected.name~='mcl_stairs:stair_cobble' and selected.name~='mcl_stairs:slab_cobble') then
+        return nil,'selected shaped node is not preserved'
+    end
+    local offset_min,offset_max=0,0
+    for _,sign in ipairs({-1,1}) do for n=1,5 do
+        local off=sign*n; local p=get(ground.x+off*lateral.x,ground.y,ground.z+off*lateral.z)
+        if not p or p.name~=selected.name or p.param2~=selected.param2 then break end
+        offset_min=math.min(offset_min,off); offset_max=math.max(offset_max,off)
+    end end
+    if offset_max-offset_min+1~=c.width then return nil,'preserved strip width differs from path' end
+    local facedir=direction.x==1 and 1 or direction.x==-1 and 3 or direction.z==1 and 0 or 2
+    local previous
+    for row=0,#c.path/2-1 do
+        local x,z=ground.x+row*direction.x,ground.z+row*direction.z
+        local first,last=c.path[row*2+1],c.path[row*2+2]
+        if first.x~=x-.25*direction.x or first.z~=z-.25*direction.z
+            or last.x~=x+.25*direction.x or last.z~=z+.25*direction.z then
+            return nil,'walking samples do not follow the selected strip'
+        end
+        local y=math.floor(math.max(first.y,last.y))
+        -- A full block's top and a stair's high half are y+0.5; a slab's is y.
+        local node=get(x,y,z)
+        if not node then return nil,'walking surface is not preserved' end
+        local h1,h2
+        if node.name=='mcl_core:cobble' and node.param2==0 then h1,h2=y+.5,y+.5
+        elseif node.name=='mcl_stairs:slab_cobble' and node.param2==0 then h1,h2=y,y
+        elseif node.name=='mcl_stairs:stair_cobble' and (node.param2==facedir or node.param2==(facedir+2)%4) then
+            if node.param2==facedir then h1,h2=y,y+.5 else h1,h2=y+.5,y end
+        else return nil,'unsupported preserved walking surface' end
+        if first.y~=h1 or last.y~=h2 or (previous and math.abs(previous-h1)>.5) then
+            return nil,'walking surface heights do not match preserved nodes'
+        end
+        if row==0 then
+            local along=(requested.x-ground.x)*direction.x+(requested.z-ground.z)*direction.z
+            local selected_height=along>=0 and h2 or h1
+            if ground.y~=y or math.abs(requested.y-selected_height)>.2 then return nil,'selected stair half does not match feet' end
+        end
+        for off=offset_min,offset_max do
+            local sx,sz=x+off*lateral.x,z+off*lateral.z
+            local p=get(sx,y,sz)
+            if not p or p.name~=node.name or p.param2~=node.param2 then return nil,'preserved row is incomplete' end
+            for dy=1,3 do
+                local clear=get(sx,y+dy,sz)
+                if not clear or clear.name~='air' then return nil,'preserved clearance is incomplete' end
+            end
+            local supported=false
+            for depth=1,32 do
+                local support=get(sx,y-depth,sz)
+                if not support then return nil,'preserved support is incomplete' end
+                if support.name~='mcl_core:cobble' then
+                    if not natural_support[support.name] then return nil,'preserved support is unsupported' end
+                    supported=true; break
+                end
+            end
+            if not supported then return nil,'preserved support exceeds depth limit' end
+            if row==#c.path/2-1 then
+                local seam=transition_columns[(sx+direction.x)..':'..(sz+direction.z)]
+                if not seam or math.abs(seam.y+.5-h2)>.5 then return nil,'terminal seam does not cover full approach width' end
+            end
+        end
+        previous=h2
+    end
+    return true
+end
+
+-- Build the same immutable footprint used during search and composition.
+function edges.connector_constraints(provenance)
+    local result = {preserved={}, reserved={}, caps={}}
+    for _,side in ipairs({'start','goal'}) do
+        local endpoint = provenance and provenance[side]
+        local c = endpoint and endpoint.connector
+        if c then
+            if type(c)~='table' or c.version~=1 or not integral_point(c.landing)
+                or not integral_point(endpoint.resolved) or id3(c.landing)~=id3(endpoint.resolved)
+                or type(c.preserved)~='table' or #c.preserved==0 or #c.preserved>50000
+                or type(c.transition)~='table' or type(c.transition.surfaces)~='table'
+                or type(c.transition.writes)~='table' or type(c.transition.expectations)~='table'
+                or #c.transition.surfaces>50000 or #c.transition.writes>10000
+                or #c.transition.expectations>50000 then
+                return nil, 'invalid connector footprint'
+            end
+            for _,p in ipairs(c.preserved) do
+                if not integral_point(p) or type(p.name)~='string' or not finite(p.param2)
+                    or p.param2~=math.floor(p.param2) or p.param2<0 or p.param2>255
+                    or p.has_metadata~=false or p.protected~=false then return nil, 'invalid preserved expectation' end
+                result.preserved[id3(p)] = true
+            end
+            if type(c.direction)~='table' or not finite(c.direction.x) or not finite(c.direction.z)
+                or math.abs(c.direction.x)+math.abs(c.direction.z)~=1
+                or (c.width~=2 and c.width~=4) or type(c.path)~='table' or #c.path==0 or #c.path>32 then
+                return nil, 'invalid connector walking path'
+            end
+            for i,p in ipairs(c.path) do
+                if type(p)~='table' or not finite(p.x) or not finite(p.y) or not finite(p.z) then return nil,'invalid connector walking sample' end
+                local previous=c.path[i-1]
+                if previous and (math.abs(p.y-previous.y)>0.5 or (p.x-previous.x)^2+(p.z-previous.z)^2>1) then
+                    return nil,'disconnected connector walking path'
+                end
+            end
+            local cap = {surfaces={}, expectations={}, writes={}}
+            local transition_columns={}
+            for _,p in ipairs(c.transition.surfaces) do
+                if not integral_point(p) then return nil, 'invalid transition surface' end
+                if p.y~=c.landing.y then return nil, 'connector transition must remain flat' end
+                local k=id2(p)
+                if transition_columns[k] then return nil, 'duplicate transition surface' end
+                transition_columns[k]=p
+                if math.abs(p.x-c.landing.x)<=1 and math.abs(p.z-c.landing.z)<=1 then
+                    if cap.surfaces[k] and cap.surfaces[k]~=p.y then return nil, 'conflicting cap surface' end
+                    cap.surfaces[k]=p.y
+                else result.reserved[k]=true end
+            end
+            local raw={}
+            for _,p in ipairs(c.preserved) do
+                local k=id3(p)
+                if raw[k] then return nil,'duplicate preserved expectation' end
+                raw[k]=p
+            end
+            local valid,why=validate_preserved(endpoint,c,raw,transition_columns)
+            if not valid then return nil,why end
+            for x=c.landing.x-1,c.landing.x+1 do for z=c.landing.z-1,c.landing.z+1 do
+                if cap.surfaces[x..':'..z]==nil then return nil, 'incomplete landing cap' end
+            end end
+            local queue={transition_columns[id2(c.landing)]}; local seen={[id2(c.landing)]=true}; local qi=1
+            while qi<=#queue do
+                local p=queue[qi]; qi=qi+1
+                for _,d in ipairs({{1,0},{-1,0},{0,1},{0,-1}}) do
+                    local k=(p.x+d[1])..':'..(p.z+d[2]); local q=transition_columns[k]
+                    if q and not seen[k] and math.abs(p.y-q.y)<=1 then seen[k]=true; queue[#queue+1]=q end
+                end
+            end
+            if #queue~=#c.transition.surfaces then return nil,'disconnected connector transition' end
+            local last=c.path[#c.path]; local seam=false
+            for _,p in ipairs(c.transition.surfaces) do
+                if math.abs(p.x-last.x)<=1.25 and math.abs(p.z-last.z)<=1.25
+                    and math.abs((p.y+0.5)-last.y)<=0.5 then seam=true; break end
+            end
+            if not seam then return nil,'disconnected connector seam' end
+            for _,name in ipairs({'expectations','writes'}) do
+                for _,p in ipairs(c.transition[name]) do
+                    if not integral_point(p) or type(p.kind)~='string' then return nil, 'invalid transition operation' end
+                    local k=id3(p)
+                    if math.abs(p.x-c.landing.x)<=1 and math.abs(p.z-c.landing.z)<=1 then
+                        if cap[name][k] then return nil, 'duplicate cap operation' end
+                        cap[name][k]=p
+                    else result.reserved[id2(p)]=true end
+                end
+            end
+            result.caps[#result.caps+1]=cap
+        end
+    end
+    return result
+end
+
+local function check_constraints(terrain, columns, constraints, material)
+    if not constraints then return end
+    for _,p in ipairs(columns) do
+        if constraints.reserved[id2(p)] then return 'connector', 'road intersects reserved transition', p end
+        local col=terrain.get_column(p.x,p.z)
+        local g,r=col.ground_y,p.y
+        local first=r<=g and r-1 or g
+        for y=first,r+3 do
+            local pos={x=p.x,y=y,z=p.z}; local k=id3(pos)
+            if constraints.preserved[k] then return 'connector', 'road intersects preserved connector', pos end
+            local entry=node(col,y)
+            for _,cap in ipairs(constraints.caps) do
+                local height=cap.surfaces[id2(p)]
+                if height then
+                    if height~=r then return 'connector', 'landing cap height differs', p end
+                    local expected=cap.expectations[k]
+                    if not expected or expected.kind~=entry.kind or expected.material~=entry.material
+                        or expected.protected~=entry.protected then return 'connector', 'landing cap expectation differs', pos end
+                    local kind,write_material
+                    if y==r then kind='road' elseif y>r then kind='air'
+                    elseif r>g and y>g then kind='fill'; write_material=col.material end
+                    local noop=kind=='air' and entry.kind=='air'
+                        or kind=='road' and entry.kind=='natural' and entry.material==material
+                        or kind=='fill' and entry.kind=='natural' and entry.material==write_material
+                    local w=cap.writes[k]
+                    if (kind and not noop) then
+                        if not w or w.kind~=kind or w.material~=write_material then return 'connector', 'landing cap write differs', pos end
+                    elseif w then return 'connector', 'landing cap write differs', pos end
+                end
+            end
+        end
+    end
+end
+
 local function allowed_existing(entry)
     return entry and (entry.kind == "natural" or entry.kind == "air"
         or entry.kind == "replaceable")
@@ -174,6 +392,12 @@ local function validate_columns(terrain, columns, counts, road_material)
     return nil
 end
 
+function edges.check_surfaces(terrain, columns, road_material)
+    local code, reason, position = validate_columns(terrain, columns, nil, road_material)
+    if code then return nil, fail(code, reason, position) end
+    return true
+end
+
 -- Reject a destination before A* only when its complete 3-by-3 cap cannot be
 -- rendered for any incoming heading or any grade-compatible predecessor
 -- elevation. This deliberately errs toward searching: it does not apply the
@@ -266,6 +490,8 @@ function edges.evaluate(terrain, anchor, state, next_heading, config)
     local counts = {cut = 0, fill = 0, cut_positions = {}}
     local issue, why, position = validate_columns(terrain, segment.columns, counts, config and config.road_material)
     if issue then return fail(issue, why, position) end
+    issue, why, position = check_constraints(terrain, segment.columns, config and config.constraints, config and config.road_material)
+    if issue then return fail(issue, why, position) end
 
     if state.heading ~= nil then
         local incoming = DIRECTIONS[state.heading + 1]
@@ -281,6 +507,8 @@ function edges.evaluate(terrain, anchor, state, next_heading, config)
         joined, err = raster.join(prior_segment, segment)
         if not joined then return fail(err.code, err.reason, err.position) end
         issue, why, position = validate_columns(terrain, joined.columns, nil, config and config.road_material)
+        if issue then return fail(issue, why, position) end
+        issue, why, position = check_constraints(terrain, joined.columns, config and config.constraints, config and config.road_material)
         if issue then return fail(issue, why, position) end
     end
 

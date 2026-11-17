@@ -1,7 +1,7 @@
 # Proposed Towns approach connectors (#26)
 
-Status: proposed design; no connector implementation exists yet. Preserve the
-natural full-block planner and add a bounded connector at either selected end.
+Status: implemented for the bounded straight Towns-compatible approaches below.
+The natural full-block planner accepts a bounded connector at either selected end.
 Do not classify stairs or slabs as ordinary replaceable terrain.
 
 ## Evidence and supported scope
@@ -18,7 +18,11 @@ Its facedirs are +Z=0, +X=1, -Z=2, -X=3. Ascending stairs face the outward
 direction; descending stairs face its opposite. Surface profiles use half-node
 levels and the ramp finishes once its full-block level meets natural terrain.
 The source explicitly avoids following a descending stair with an excessively
-low slab. Supports may extend down to 32 nodes below town ground.
+low slab. Supports may extend down to 32 nodes below town ground. That original
+town-ground datum is not available from a selected ramp piece. The MVP's
+32-node support inspection limit below each selected surface is deliberately
+conservative: an ascending ramp with an unusually deep transverse support may
+be genuine Towns geometry yet fail with an explicit support-depth limit.
 
 VoxeLibre's `mods/ITEMS/mcl_stairs/api.lua` defines an upright stair as a full
 bottom half plus an upper half on local +Z. Bottom slabs end at node-center Y;
@@ -98,7 +102,7 @@ Connector endpoints explicitly extend it:
       {x,y,z,name="mcl_stairs:stair_cobble",param2=0,
        has_metadata=false,protected=false}, ...
     },
-    transition={surfaces=..., writes=..., expectations=...}
+    transition={surfaces=..., writes=..., expectations=..., path=...}
   }
 }
 ```
@@ -106,7 +110,8 @@ Connector endpoints explicitly extend it:
 Here `ground` is the selected support node, not necessarily a natural full block;
 `resolved` and `landing` are identical natural planner points. Record fractional
 walking elevations only in connector geometry; do not pass them into the A*
-lattice. Endpoint resolution, planner input validation, and composer provenance
+lattice. `transition.path` records the physical centerline of the flat transition
+for preview and length reporting. Endpoint resolution, planner input validation, and composer provenance
 validation must agree on this alternative contract. Keep route search, raster
 segments, and edge costs unchanged except for the connector constraints below.
 
@@ -159,6 +164,11 @@ preserved surface/support/clearance coordinate, even a nominal no-op; the natura
 cap must not excavate underneath the preserved approach. Deduplicate compatible
 expectations and reject incompatible ones. Check the entire connector-to-cap
 seam, rather than reporting success for two disconnected components.
+
+Retain the current construction service's limits of 10,000 writes and 50,000
+total inspected expectations, including exact connector expectations. Do not
+raise these to the earlier design document's proposed 50,000-write limit.
+Retain its node-timer rejection during preflight for connector coordinates too.
 
 Plans using connectors must use top-level `version=2` plus `connector_version=1`.
 The version bump makes the initial #12 version-one builder fail closed even if

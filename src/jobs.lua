@@ -184,7 +184,7 @@ function jobs.new(ops)
         if type(record.plan)~="table" or type(record.plan.centerline)~="table" then
             return nil,error_result("plan_unavailable","the route geometry is unavailable")
         end
-        return copy(record.plan.centerline)
+        return copy(record.plan.centerline),nil,copy(record.plan.endpoints)
     end
 
     function self:build(owner)

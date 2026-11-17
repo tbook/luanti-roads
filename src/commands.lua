@@ -6,6 +6,17 @@ local function fmt_point(p)
     if type(p)~="table" then return "unknown" end
     return string.format("(%.1f, %.1f, %.1f)",p.x,p.y,p.z)
 end
+local function path_length(path,previous)
+    local length=0
+    for _,p in ipairs(path or {}) do
+        if previous then
+            local dx,dy,dz=p.x-previous.x,p.y-previous.y,p.z-previous.z
+            length=length+math.sqrt(dx*dx+dy*dy+dz*dz)
+        end
+        previous=p
+    end
+    return length
+end
 local function summary(status)
     local state=status.state or "idle"
     if state=="idle" then return "No road plan is active." end
@@ -15,8 +26,23 @@ local function summary(status)
     end
     local e=status.endpoints
     if e then
-        lines[#lines+1]="Start requested "..fmt_point(e.start.requested)..", resolved "..fmt_point(e.start.resolved).."."
-        lines[#lines+1]="Goal requested "..fmt_point(e.goal.requested)..", resolved "..fmt_point(e.goal.resolved).."."
+        for _,key in ipairs({"start","goal"}) do
+            local endpoint=e[key]
+            local label=key=="start" and "Start" or "Goal"
+            lines[#lines+1]=label.." selected "..fmt_point(endpoint.requested)..", natural landing "..fmt_point(endpoint.resolved).."."
+            local c=endpoint.connector
+            if c then
+                local dx=endpoint.resolved.x-endpoint.requested.x
+                local dy=endpoint.resolved.y+0.5-endpoint.requested.y
+                local dz=endpoint.resolved.z-endpoint.requested.z
+                local displacement=math.sqrt(dx*dx+dy*dy+dz*dz)
+                local path=c.path or {}; local transition=c.transition or {}
+                local preserved_length=path_length(path)
+                local transition_length=path_length(transition.path,path[#path])
+                lines[#lines+1]=string.format("%s connector: %.1f nodes displacement, %.1f nodes preserved path, %.1f nodes transition.",
+                    label,displacement,preserved_length,transition_length)
+            end
+        end
     elseif status.requested_endpoints then
         lines[#lines+1]="Start requested "..fmt_point(status.requested_endpoints.start)..", not yet resolved."
         lines[#lines+1]="Goal requested "..fmt_point(status.requested_endpoints.goal)..", not yet resolved."
@@ -105,9 +131,9 @@ function commands.register(engine,controller,surface,world_config,preview_render
     if preview_renderer then
         register("roads_preview","Show your route as a temporary particle preview",function(name)
             if not engine.get_player_by_name(name) then return false,"This command requires an online player." end
-            local route,why=controller:preview_route(name)
+            local route,why,endpoints=controller:preview_route(name)
             if not route then return false,why.reason end
-            local count,preview_error=preview_renderer:show(name,route)
+            local count,preview_error=preview_renderer:show(name,route,endpoints)
             if not count then return false,preview_error.reason end
             return true,string.format("Showing %d temporary route markers for 30 seconds. Look above the road.",count)
         end)
