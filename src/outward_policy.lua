@@ -7,6 +7,7 @@ local policy = {}
 
 policy.VERSION = 1
 policy.RADIUS = 512            -- settlement search radius, horizontal nodes
+policy.MAX_SETTLEMENTS = 32    -- Towns API v1 returns at most this many records
 policy.MIN_DISTANCE = 64       -- candidate distance from the outward planning landing
 policy.MAX_DISTANCE = 128
 policy.MAX_ANGLE = 45          -- degrees either side of the exit's outward direction
@@ -155,15 +156,21 @@ function policy.select(input)
         end
     end
     table.sort(ranked, by_identity)
+    -- Towns currently caps nearby results at 32. Keep the pure policy bounded
+    -- too if a caller supplies a larger list, retaining the nearest records.
+    while #ranked > policy.MAX_SETTLEMENTS do ranked[#ranked] = nil end
 
-    local chosen, blocked = nil, {}
+    local blocked, open = {}, {}
     for _, entry in ipairs(ranked) do
         local state = input.eligibility(entry.id)
-        if state == "open" then chosen = entry; break end
-        blocked[#blocked + 1] = {settlement_id = entry.id, state = tostring(state),
-            reason = BLOCKED_REASON[state] or "is not usable"}
+        if state == "open" then
+            open[#open + 1] = entry
+        else
+            blocked[#blocked + 1] = {settlement_id = entry.id, state = tostring(state),
+                reason = BLOCKED_REASON[state] or "is not usable"}
+        end
     end
-    if not chosen then
+    if #open == 0 then
         if #ranked == 0 then
             return err("no_eligible_settlement", "no completed settlement within " .. policy.RADIUS .. " nodes",
                 {considered = 0, blocked = blocked, radius = policy.RADIUS})
@@ -173,29 +180,45 @@ function policy.select(input)
             {considered = #ranked, blocked = blocked, radius = policy.RADIUS})
     end
 
-    -- Exits in stable order; the first one the service reports open is used.
-    -- The chosen settlement is not abandoned for another if no exit is usable.
-    local exit_ids = {}
-    for _, e in ipairs(chosen.record.exits or {}) do
-        if type(e) == "table" and type(e.id) == "string" then exit_ids[#exit_ids + 1] = e.id end
-    end
-    table.sort(exit_ids)
-    local descriptor, exit_id, skipped = nil, nil, {}
-    for i, id in ipairs(exit_ids) do
-        if i == 1 or id ~= exit_ids[i - 1] then
-            local desc, why = input.exit(chosen.record, id)
-            if desc then
-                local state = input.eligibility(chosen.id, id)
-                if state == "open" then descriptor, exit_id = desc, id; break end
-                skipped[#skipped + 1] = {exit_id = id, state = tostring(state)}
-            else
-                skipped[#skipped + 1] = {exit_id = id, state = "unsupported", reason = type(why) == "table" and why.reason or nil}
+    -- Try each open settlement nearest-first. The nearest one with a usable
+    -- exit wins; ties and exits are stable by identity. Towns' result cap bounds
+    -- settlement lookups and the service eligibility checks above.
+    local chosen, descriptor, exit_id, skipped, no_exits
+    skipped, no_exits = {}, {}
+    for _, entry in ipairs(open) do
+        local exit_ids = {}
+        for _, e in ipairs(entry.record.exits or {}) do
+            if type(e) == "table" and type(e.id) == "string" then exit_ids[#exit_ids + 1] = e.id end
+        end
+        if #exit_ids == 0 then
+            no_exits[#no_exits + 1] = {settlement_id = entry.id, reason = "has no published exits"}
+        end
+        table.sort(exit_ids)
+        local seen_exit = {}
+        for _, id in ipairs(exit_ids) do
+            if not seen_exit[id] then
+                seen_exit[id] = true
+                local desc, why = input.exit(entry.record, id)
+                if desc then
+                    local state = input.eligibility(entry.id, id)
+                    if state == "open" then
+                        chosen, descriptor, exit_id = entry, desc, id
+                        break
+                    end
+                    skipped[#skipped + 1] = {settlement_id = entry.id, exit_id = id, state = tostring(state)}
+                else
+                    skipped[#skipped + 1] = {settlement_id = entry.id, exit_id = id,
+                        state = "unsupported", reason = type(why) == "table" and why.reason or nil}
+                end
             end
         end
+        if chosen then break end
     end
-    if not descriptor then
-        return err("no_usable_exit", "settlement " .. chosen.id .. " has no usable open exit",
-            {settlement_id = chosen.id, skipped = skipped})
+    if not chosen then
+        return err("no_usable_exit", "no open settlement within " .. policy.RADIUS
+            .. " nodes has a usable exit: " .. #open .. " open settlement(s) checked",
+            {settlement_id = open[1].id, skipped = skipped, no_exits = no_exits,
+                blocked = blocked, considered = #ranked})
     end
 
     local nominal = nominal_landing(descriptor)

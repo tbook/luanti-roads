@@ -40,14 +40,17 @@ and never touches the service lifecycle.
 
 1. **Settlement.** Completed settlements are listed with
    `towns_api.settlements` within **512 horizontal nodes** of the requester (by
-   the adapter's `nearby`). The nearest one whose service eligibility is `open`
-   is chosen. Ties are broken by settlement id. Settlements that are `reserved`
-   (a built road), `unreadable`, or `active` are skipped and reported.
-2. **Exit.** The chosen settlement's exits are considered in id order. The first
-   one that normalizes (`towns_adapter.exit`) and is `open` for the service is
+   the adapter's `nearby`, which returns at most 32). They are considered
+   nearest first, with ties broken by settlement id. Settlements that are
+   `reserved` (a built road), `unreadable`, or `active` are skipped and reported.
+   Among open settlements, the nearest one with a usable exit is chosen.
+2. **Exit.** Open settlements' exits are considered in id order. The first one
+   that normalizes (`towns_adapter.exit`) and is `open` for the service is
    chosen. Partial, interrupted or uncertain exits, and unsupported exits, are
-   skipped and reported. If no exit is usable, the command reports
-   `no_usable_exit`. It does **not** try another settlement.
+   skipped and reported. If no exit is usable, selection continues to the next
+   open settlement. If none has a usable exit, the command reports
+   `no_usable_exit` with the checked settlement and exit reasons, including
+   settlements with no published exits.
 3. **Nominal planning landing.** The first node beyond the exit's built length,
    on the lateral centre of its columns:
    `anchor + (length + 1) * direction + centre * lateral`. `centre` is the
@@ -93,7 +96,7 @@ Every failure is a single clear line with a code. Examples:
 | Unsupported `towns_api` version | `towns_unsupported` | |
 | Registry unhealthy | `towns_unavailable` | |
 | Nothing open within 512 nodes | `no_eligible_settlement` | If none is found nearby, the plain text. If some are found but all are skipped, lists each settlement and why (built road, in progress, unreadable record). |
-| Chosen settlement has no usable exit | `no_usable_exit` | Lists each skipped exit and why. |
+| No open settlement has a usable exit | `no_usable_exit` | Lists each checked settlement exit and why; at most 32 settlements are checked. |
 | No seeded target survives the bounds | `no_target` | Reports the settlement and exit. |
 | Operation or slot busy | `busy` | Also when a manual plan holds the slot. |
 | Built or uncertain prior work | `already_reserved` | Only reachable on a race; selection avoids it. |
@@ -165,13 +168,9 @@ interaction) and real VoxeLibre geometry.
 
 ## 5. Limitations
 
-- **Towns returns at most 32 settlements** per query. If the nearest 32 within
-  512 nodes are all blocked, the command reports `no_eligible_settlement` even if
-  a farther open settlement exists.
-- **No settlement fall-through.** When the nearest open settlement has no usable
-  exit, the command reports it rather than trying the next one. This follows the
-  ticket's "report no usable exit rather than scanning". A product decision is
-  needed if this should change.
+- **Towns returns at most 32 settlements** per query. If those are all blocked
+  or have no usable exit, the command reports the checked settlements even if a
+  farther open settlement exists.
 - **Targets ignore Towns exclusions at selection time.** Only the source's
   footprint (core and structures) is checked when generating targets. Exclusions, other settlements
   and the connector's own rules are enforced later by the service's overlay,
