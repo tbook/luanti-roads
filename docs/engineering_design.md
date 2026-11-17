@@ -277,6 +277,11 @@ The optional Towns adapter, the persistent outward-road service, and the
 record contract are specified in `docs/outward_road_service.md`. They reuse
 the survey, planner, composer, and builder modules unchanged in purpose.
 
+Player-driven continuation, per-cycle destination selection and bounded
+automatic activation are specified in [the road growth design](road_growth_design.md)
+for epic #44. That design describes future behavior and preserves the existing
+manual planner and outward-service contracts.
+
 ## References
 
 - [Luanti mod structure](https://api.luanti.org/mods/).
