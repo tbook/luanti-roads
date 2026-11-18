@@ -3,6 +3,7 @@
 -- service, store, Towns adapter and job slot. Only the terrain pipeline
 -- (survey, search, composition, construction) is scripted.
 local commands = dofile('src/commands.lua')
+local preview = dofile('src/preview.lua')
 local lifecycle = dofile('src/jobs.lua')
 local outward = dofile('src/outward.lua')
 local outward_store = dofile('src/outward_store.lua')
@@ -73,7 +74,10 @@ local function harness(options)
         exit_endpoints = function(_, descriptor, target)
             local a = descriptor.anchor
             return {start = {requested = {x = a.x, y = a.y + 0.5, z = a.z}, ground = copy(a),
-                    resolved = {x = a.x + 20, y = 1, z = a.z}, connector = {origin = 'published_exit'}},
+                resolved = {x = a.x + 20, y = 1, z = a.z}, connector = {version = 1,
+                    path = {{x = a.x, y = a.y + 0.5, z = a.z}, {x = a.x + 1, y = a.y + 0.5, z = a.z}},
+                    transition = {path = {{x = a.x + 2, y = a.y + 0.5, z = a.z},
+                        {x = a.x + 3, y = a.y + 0.5, z = a.z}}}}},
                 goal = {requested = {x = target.x, y = 1.5, z = target.z}, ground = {x = target.x, y = 1, z = target.z},
                     resolved = {x = target.x, y = 1, z = target.z}}}
         end,
@@ -84,9 +88,13 @@ local function harness(options)
                     return {status = 'failed', metrics = {expansions = 30, states = 4, heap_peak = 3},
                         error = {code = 'bounded_no_route', reason = 'no route within bounds'}}
                 end
+                local a, b = request.start, request.goal
+                local steps = math.max(1, math.ceil(math.max(math.abs(b.x-a.x), math.abs(b.z-a.z))/4))
+                local line = {}
+                for i = 0, steps do line[#line+1] = {x = math.floor(a.x+(b.x-a.x)*i/steps+0.5), y = 1,
+                    z = math.floor(a.z+(b.z-a.z)*i/steps+0.5)} end
                 return {status = 'succeeded', metrics = {expansions = 120, states = 10, heap_peak = 8},
-                    route = {request = request, centerline = {{x = request.start.x, y = 1, z = request.start.z},
-                        {x = request.goal.x, y = 1, z = request.goal.z}}, headings = {2}, cost = 5,
+                    route = {request = request, centerline = line, headings = {2}, cost = 5,
                         metrics = {length = 20, ascent = 1, descent = 0, max_grade = 0.1, turn_count = 1, cut_count = 2, fill_count = 3}}}
             end
             function planner:cancel() self.cancelled = true end
@@ -365,12 +373,11 @@ test('route geometry is bounded, starts and ends on the road, and shows the term
 end)
 
 test('/roads_preview shows the outward centreline when no manual plan exists', function()
-    local shown = {}
-    local renderer = {show = function(_, owner, centerline, endpoints)
-        shown[#shown + 1] = {owner = owner, count = #centerline, endpoints = endpoints}
-        return #centerline
-    end}
+    local particles = {}
     local h = harness()
+    h.pos = {x = 29, y = 0, z = 0} -- Keep the fixture route within planner edge limits.
+    local renderer = assert(preview.new({add_particle = function(def) particles[#particles + 1] = def end},
+        function() return h.time end))
     local cmds = h.commands_with(nil, nil, renderer)
     local ok, msg = cmds.roads_outward.func('alice')
     assert(ok, msg)
@@ -378,11 +385,17 @@ test('/roads_preview shows the outward centreline when no manual plan exists', f
     h.build.done(nil, {writes = 2, pause_seconds = 0})
     ok, msg = cmds.roads_preview.func('alice')
     assert(ok and msg:find('temporary route markers', 1, true), msg)
-    assert(shown[1].owner == 'alice' and shown[1].count == 2 and shown[1].endpoints == nil)
+    assert(#particles >= 4)
+    local saw_preserved, saw_transition = false, false
+    for _, particle in ipairs(particles) do
+        if particle.texture:find('55e6ff', 1, true) then saw_preserved = true end
+        if particle.texture:find('ff9f43', 1, true) then saw_transition = true end
+    end
+    assert(saw_preserved and saw_transition, 'real renderer should emit both connector segments')
     -- Someone else has nothing to preview.
     h.players.bob = h.players.alice
     ok, msg = cmds.roads_preview.func('bob')
-    assert(not ok and msg ~= nil and #shown == 1, msg)
+    assert(not ok and msg ~= nil and #particles >= 4, msg)
 end)
 
 print('ok - ' .. count .. ' outward command tests')

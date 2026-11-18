@@ -91,7 +91,10 @@ local function harness(options)
             if beh.endpoint_error then return nil, beh.endpoint_error end
             local anchor = descriptor.anchor
             return {start = {requested = {x = anchor.x, y = anchor.y + 0.5, z = anchor.z}, ground = copy(anchor),
-                    resolved = {x = anchor.x + 20, y = 1, z = anchor.z}, connector = {origin = 'published_exit'}},
+                    resolved = {x = anchor.x + 20, y = 1, z = anchor.z}, connector = {version = 1,
+                        path = {{x = anchor.x, y = anchor.y + 0.5, z = anchor.z},
+                            {x = anchor.x + 1, y = anchor.y + 0.5, z = anchor.z}},
+                        transition = {path = {{x = anchor.x + 2, y = anchor.y + 0.5, z = anchor.z}}}}},
                 goal = {requested = {x = target.x, y = 1.5, z = target.z}, ground = {x = target.x, y = 1, z = target.z},
                     resolved = {x = target.x, y = 1, z = target.z}}}
         end,
@@ -246,6 +249,11 @@ test('a request completes: durable intent precedes construction, then the settle
     assert(#h.builds == 0 and op.state == 'building' and op.writes == 'unknown')
     assert(op.road.chosen_index == 1 and op.road.requested_target.x == 100 and #op.road.centerline == 2)
     assert(op.road.terminal.x == 100 and op.road.terminal_heading == 2 and op.road.outward.x == 1)
+    assert(op.road.preview_endpoints == nil and op.road.endpoints == nil,
+        'display-only connector geometry must not be persisted')
+    local live = h.service:status(SID)
+    assert(live.road.endpoints and live.road.endpoints.start.connector,
+        'live status should expose connector geometry for preview')
     assert(op.road.write_count == 2 and op.road.footprint.x1 == 30 and op.road.metrics.length == 20)
     assert(op.aggregate.expansions == 100 and op.aggregate.chunks == 2)
     local waited_from = h.time
