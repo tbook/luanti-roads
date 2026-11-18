@@ -259,6 +259,17 @@ test('a request far from every settlement reports no eligible settlement with th
     assert(h.storage.sets == 0 and h.service.active == nil)
 end)
 
+test('no_usable_exit reports an open settlement with no published exits', function()
+    local h = harness()
+    local empty = towns_fixture.settlement('auto:empty:0', {})
+    empty.center = {x = 100, y = 1, z = 0}
+    h.fake.others = {empty}
+    local ok, msg = h.run_cmd('roads_outward')
+    assert(not ok and msg:find('no_usable_exit', 1, true), msg)
+    assert(msg:find('Settlement auto:empty:0 has no published exits.', 1, true), msg)
+    assert(h.storage.sets == 0 and h.service.active == nil)
+end)
+
 test('a partial or uncertain exit is skipped and the other exit is used', function()
     local h = harness()
     local op = h.store:new_op(SID, EAST, {settlement_id = SID, requester = 'bob', source = {}, policy = {}, candidates = {},

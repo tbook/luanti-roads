@@ -127,15 +127,50 @@ test('exits are chosen in stable order; reserved and unsupported exits are skipp
         eligibility = states({['auto:5:5/+x:240:0'] = 'partial'})})))
     assert(chosen.exit_id == '-x:160:0', chosen.exit_id)
 
-    -- Every exit blocked: report it for this settlement; do not fall through to another one.
+    -- Every eligible settlement without a usable exit is reported.
     local other = town('auto:6:6', 300, 0, {placed_exit({x=1, z=0}, 'flat', 2, 340, 0)})
     local none, err = policy.select(request({s, other}, {exit = exit_fn, eligibility = states({
-        ['auto:5:5/+x:240:0'] = 'partial', ['auto:5:5/-x:160:0'] = 'reserved'})}))
+        ['auto:5:5/+x:240:0'] = 'partial', ['auto:5:5/-x:160:0'] = 'reserved',
+        ['auto:6:6/+x:340:0'] = 'partial'})}))
     assert(not none and err.code == 'no_usable_exit' and err.settlement_id == 'auto:5:5', err and err.code)
-    assert(#err.skipped == 3)
+    assert(#err.skipped == 4)
     local seen = {}
-    for _, item in ipairs(err.skipped) do seen[item.exit_id] = item.state end
-    assert(seen['+x:240:0'] == 'partial' and seen['-x:160:0'] == 'reserved' and seen[unsupported] == 'unsupported')
+    for _, item in ipairs(err.skipped) do seen[item.settlement_id..'/'..item.exit_id] = item.state end
+    assert(seen['auto:5:5/+x:240:0'] == 'partial' and seen['auto:5:5/-x:160:0'] == 'reserved'
+        and seen['auto:5:5/'..unsupported] == 'unsupported' and seen['auto:6:6/+x:340:0'] == 'partial')
+end)
+
+test('nearest open settlement with no usable exit falls back to the next eligible settlement', function()
+    local near = town('auto:1:0', 100, 0, {placed_exit({x=1, z=0}, 'flat', 2, 140, 0)})
+    local far = town('auto:2:0', 200, 0, {placed_exit({x=0, z=1}, 'flat', 2, 200, 40)})
+    local result = assert(policy.select(request({far, near}, {eligibility = states({
+        ['auto:1:0/+x:140:0'] = 'partial'})})))
+    assert(result.settlement_id == 'auto:2:0' and result.exit_id == '+z:200:40')
+end)
+
+test('open settlement with no published exits has an explicit no-usable-exit diagnostic', function()
+    local s = town('auto:0:0', 100, 0, {})
+    local result, err = policy.select(request({s}))
+    assert(not result and err.code == 'no_usable_exit')
+    assert(#err.no_exits == 1 and err.no_exits[1].settlement_id == 'auto:0:0')
+    assert(err.no_exits[1].reason == 'has no published exits')
+end)
+
+test('selection caps work at the nearest 32 settlements and reports bounded no-exit details', function()
+    local settlements, calls = {}, 0
+    for i = 1, 33 do
+        local id = string.format('auto:%02d:0', i)
+        settlements[#settlements + 1] = town(id, i * 10, 0,
+            {placed_exit({x=1, z=0}, 'flat', 2, i * 10 + 40, 0)})
+    end
+    local result, err = policy.select(request(settlements, {
+        eligibility = function() calls = calls + 1; return 'open' end,
+        exit = function() return nil, {reason = 'unsupported fixture'} end,
+    }))
+    assert(not result and err.code == 'no_usable_exit')
+    assert(calls == policy.MAX_SETTLEMENTS, calls)
+    assert(err.considered == 32 and #err.skipped == 32)
+    assert(err.skipped[1].settlement_id == 'auto:01:0' and err.skipped[32].settlement_id == 'auto:32:0')
 end)
 
 test('candidates keep distance, angle, reservation and separation bounds for every exit shape', function()

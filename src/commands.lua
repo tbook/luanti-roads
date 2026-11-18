@@ -121,7 +121,11 @@ local function failure(e)
         text=text.." "..tostring(b.settlement_id).." "..(b.reason or ("is "..tostring(b.state))).."."
     end
     for _,s in ipairs(type(e.skipped)=="table" and e.skipped or {}) do
-        text=text.." Exit "..tostring(s.exit_id).." is "..tostring(s.state)..(s.reason and (" ("..s.reason..")") or "").."."
+        text=text..(s.settlement_id and (" Settlement "..tostring(s.settlement_id).." exit ") or " Exit ")
+            ..tostring(s.exit_id).." is "..tostring(s.state)..(s.reason and (" ("..s.reason..")") or "").."."
+    end
+    for _,s in ipairs(type(e.no_exits)=="table" and e.no_exits or {}) do
+        text=text.." Settlement "..tostring(s.settlement_id).." "..tostring(s.reason or "has no usable exits").."."
     end
     return text
 end
