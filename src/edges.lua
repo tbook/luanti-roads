@@ -497,13 +497,18 @@ function edges.evaluate(terrain, anchor, state, next_heading, config)
 
     local segment, err = raster.segment(from, to)
     if not segment then return fail(err.code, err.reason, err.position) end
+    if config and config.start_seam then
+        local joined
+        joined,err=raster.join({columns=config.start_seam.surfaces},segment)
+        if not joined then return fail(err.code,err.reason,err.position) end
+    end
     local counts = {cut = 0, fill = 0, cut_positions = {}}
     local issue, why, position = validate_columns(terrain, segment.columns, counts, config and config.road_material)
     if issue then return fail(issue, why, position) end
     issue, why, position = check_constraints(terrain, segment.columns, config and config.constraints, config and config.road_material)
     if issue then return fail(issue, why, position) end
 
-    if state.heading ~= nil then
+    if state.heading ~= nil and not (config and config.start_seam and config.initial) then
         local incoming = DIRECTIONS[state.heading + 1]
         local previous_i, previous_j = state.i - incoming[1], state.j - incoming[2]
         local previous_x, previous_z = anchor.x + 4 * previous_i, anchor.z + 4 * previous_j

@@ -1,13 +1,16 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 -- Deterministic, resumable A* over lattice position and incoming heading.
 local planner = {}
-local edges
+local edges, seam, raster
 local defaults = {slope=4, turn=2, cut=1, fill=1}
 local local_errors = {outside=true, unknown=true, water=true, structure=true, grade=true,
     earthwork=true, support=true, clearance=true, protected=true, profile_conflict=true, step_height=true, connector=true}
 
 local function finite(n)
     return type(n) == 'number' and n == n and n ~= math.huge and n ~= -math.huge
+end
+function planner.set_seam_dependencies(s, r)
+    seam, raster = s, r
 end
 local function integer(n) return finite(n) and n == math.floor(n) end
 local function copy(t)
@@ -99,6 +102,17 @@ function planner.new(terrain, request, config)
     local requested_dx, requested_dz = requested_b.x-requested_a.x, requested_b.z-requested_a.z
     local ground_b = request.provenance.goal.ground
     local pa,pb=request.provenance.start,request.provenance.goal
+    local growth=request.start_seam~=nil
+    if growth then
+        if not seam or not raster or pa.connector or pb.connector then
+            return nil,failure('invalid_endpoint','growth seam dependencies or provenance are invalid')
+        end
+        local valid,err,overlay=seam.check_request(raster,request,terrain,config.seam_access,config.seam_has_timer)
+        if not valid then return nil,err end
+        terrain=overlay
+    elseif request.start_heading~=nil or pa.origin=='growth_seam' then
+        return nil,failure('invalid_endpoint','growth provenance requires a seam')
+    end
     local constraints, constraint_error
     if pa.connector or pb.connector then
         if type(edges.connector_constraints)~='function' then return nil, failure('invalid_config','connector constraints unavailable') end
@@ -107,7 +121,7 @@ function planner.new(terrain, request, config)
     end
     if (dx == 0 and dz == 0) or dx % 4 ~= 0 or dz % 4 ~= 0 or dx*dx+dz*dz > 192*192
         or requested_dx*requested_dx+requested_dz*requested_dz > 192*192
-        or (not pa.connector and not same(pa.ground,a))
+        or (not pa.connector and not growth and not same(pa.ground,a))
         or (not pb.connector and (b.x ~= a.x + 4*math.floor((requested_b.x-a.x)/4+0.5)
         or b.z ~= a.z + 4*math.floor((requested_b.z-a.z)/4+0.5)
         or (requested_b.x-b.x)^2+(requested_b.z-b.z)^2 > 9
@@ -115,7 +129,7 @@ function planner.new(terrain, request, config)
         return nil, failure('invalid_endpoint', 'endpoints must be distinct, aligned, and within range')
     end
     local checked={a,b}
-    if not pa.connector then checked[#checked+1]=pa.ground end
+    if not pa.connector and not growth then checked[#checked+1]=pa.ground end
     if not pb.connector then checked[#checked+1]=pb.ground end
     for _,p in ipairs(checked) do
         local ok,c = pcall(terrain.get_column,p.x,p.z)
@@ -134,8 +148,8 @@ function planner.new(terrain, request, config)
     a,b = self.request.start,self.request.goal
     local goal_i, goal_j = dx/4,dz/4
     local function heuristic(i,j) return 4 * math.sqrt((goal_i-i)^2 + (goal_j-j)^2) end
-    local start = {i=0,j=0,heading=nil,g=0}
-    self.records[key(0,0,nil)] = start
+    local start = {i=0,j=0,heading=growth and request.start_heading or nil,g=0}
+    self.records[key(0,0,start.heading)] = start
     push(self.heap,{record=start,g=0,h=heuristic(0,0),f=heuristic(0,0),serial=0})
     local function finish(status, err, route)
         self.terminal = {status=status, metrics=copy(self.metrics), error=err, route=route}
@@ -146,8 +160,8 @@ function planner.new(terrain, request, config)
         while rec do
             local x,z = a.x+4*rec.i,a.z+4*rec.j
             local col = terrain.get_column(x,z)
-            reversed[#reversed+1] = {x=x,y=col.ground_y,z=z}
-            if rec.heading ~= nil then headings[#headings+1] = rec.heading end
+            reversed[#reversed+1] = {x=x,y=rec.parent and col.ground_y or a.y,z=z}
+            if rec.parent then headings[#headings+1] = rec.heading end
             rec = rec.parent
         end
         local points, hs = {}, {}
@@ -214,7 +228,8 @@ function planner.new(terrain, request, config)
                 if rec.heading == nil then headings = {0,1,2,3,4,5,6,7}
                 else headings = {rec.heading,(rec.heading+1)%8,(rec.heading+7)%8} end
                 for _,h in ipairs(headings) do
-                    local edge = edges.evaluate(terrain,a,rec,h,{weights=weights, road_material=road_material, constraints=constraints})
+                    local edge = edges.evaluate(terrain,a,rec,h,{weights=weights, road_material=road_material, constraints=constraints,
+                        start_seam=growth and self.request.start_seam or nil, initial=rec.parent==nil})
                     if not edge.ok then
                         if not local_errors[edge.code] then return finish('failed',failure(edge.code,edge.reason,{position=edge.position})) end
                         self.metrics.rejections[edge.code] = (self.metrics.rejections[edge.code] or 0) + 1

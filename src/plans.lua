@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 -- Pure composition of a route against the same immutable terrain snapshot.
 local plans = {}
-local raster, edges
+local raster, edges, seam
 local dirs = {{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1}}
 local function copy(v)
     if type(v) ~= 'table' then return v end
@@ -31,6 +31,7 @@ function plans.set_dependencies(r, e)
     raster, edges = r, e
     return true
 end
+function plans.set_seam_dependency(s) seam=s end
 
 function plans.compose(terrain, route, config)
     if not raster or not edges or type(terrain) ~= 'table' or type(terrain.get_column) ~= 'function'
@@ -62,6 +63,15 @@ function plans.compose(terrain, route, config)
     end
     local a,b = request.start,request.goal
     local pa,pb = request.provenance.start,request.provenance.goal
+    local growth=request.start_seam~=nil
+    if growth then
+        if not seam or pa.connector or pb.connector then return fail('invalid_endpoint','invalid growth seam dependencies') end
+        local valid,err,overlay=seam.check_request(raster,request,terrain,config.seam_access,config.seam_has_timer)
+        if not valid then return nil,err end
+        terrain=overlay
+    elseif request.start_heading~=nil or pa.origin=='growth_seam' then
+        return fail('invalid_endpoint','growth provenance requires a seam')
+    end
     local constraints, has_connector
     has_connector=pa.connector or pb.connector
     if has_connector then
@@ -76,7 +86,7 @@ function plans.compose(terrain, route, config)
     end
     local dx,dz = b.x-a.x,b.z-a.z
     local rdx,rdz = pb.requested.x-pa.requested.x,pb.requested.z-pa.requested.z
-    if not valid_endpoint(pa) or not valid_endpoint(pb) or (not pa.connector and not same(pa.ground,a))
+    if not valid_endpoint(pa) or not valid_endpoint(pb) or (not pa.connector and not growth and not same(pa.ground,a))
         or (dx==0 and dz==0) or dx%4~=0 or dz%4~=0 or dx*dx+dz*dz>192*192
         or rdx*rdx+rdz*rdz>192*192
         or (not pb.connector and (b.x~=a.x+4*math.floor((pb.requested.x-a.x)/4+0.5)
@@ -86,7 +96,7 @@ function plans.compose(terrain, route, config)
         return fail('invalid_endpoint', 'endpoint provenance is inconsistent')
     end
     local checked={a,b}
-    if not pa.connector then checked[#checked+1]=pa.ground end
+    if not pa.connector and not growth then checked[#checked+1]=pa.ground end
     if not pb.connector then checked[#checked+1]=pb.ground end
     for _,p in ipairs(checked) do
         local ok,c = pcall(terrain.get_column,p.x,p.z)
@@ -108,9 +118,11 @@ function plans.compose(terrain, route, config)
         if b.x-a.x~=4*d[1] or b.z-a.z~=4*d[2] then
             return fail('composition_failed', 'heading does not match centerline', b)
         end
-        local state = {i=(a.x-anchor.x)/4, j=(a.z-anchor.z)/4, heading=route.headings[i-1]}
+        local state = {i=(a.x-anchor.x)/4, j=(a.z-anchor.z)/4,
+            heading=route.headings[i-1] or (growth and request.start_heading or nil)}
         local edge = edges.evaluate(terrain, anchor, state, h,
-            {weights=route.parameters.weights, road_material=config.road_material, constraints=constraints})
+            {weights=route.parameters.weights, road_material=config.road_material, constraints=constraints,
+                start_seam=growth and request.start_seam or nil,initial=i==1})
         if not edge.ok then return fail('composition_failed', 'edge rejected: '..tostring(edge.code)..': '..tostring(edge.reason), edge.position) end
         local ca, cb = terrain.get_column(a.x,a.z), terrain.get_column(b.x,b.z)
         if ca.ground_y ~= a.y or cb.ground_y ~= b.y then
@@ -155,6 +167,10 @@ function plans.compose(terrain, route, config)
         end
     end
     local writes, expectations = {}, {}
+    local preserved={}
+    if growth then
+        for _,p in ipairs(request.start_seam.preserved) do preserved[p.x..':'..p.y..':'..p.z]=p end
+    end
     local counts = {road_count=0, fill_count=0, clear_count=0, cut_count=0, write_count=0}
     local function expect(p,y,entry)
         expectations[#expectations+1] = {x=p.x,y=y,z=p.z,kind=entry.kind,
@@ -183,15 +199,29 @@ function plans.compose(terrain, route, config)
             if constraints and constraints.preserved[p.x..':'..y..':'..p.z] then
                 return fail('composition_failed','operation intersects preserved connector',{x=p.x,y=y,z=p.z})
             end
-            expect(p,y,entry)
+            local exact=preserved[p.x..':'..y..':'..p.z]
+            if exact and not (entry.kind=='air' and exact.name=='air'
+                or entry.kind=='natural' and entry.material==exact.name) then
+                return fail('seam_changed','survey and exact seam node differ',{x=p.x,y=y,z=p.z})
+            end
+            if not exact then expect(p,y,entry) end
             local kind,material
             if y==r then kind='road'
             elseif y>r then kind='air'
             elseif r>g and y>g then kind='fill'; material=col.material end
-            if kind and not write(p,y,kind,material,entry) then
+            local noop=kind=='air' and entry.kind=='air'
+                or kind=='road' and entry.kind=='natural' and entry.material==config.road_material
+                or kind=='fill' and entry.kind=='natural' and entry.material==material
+            if exact and kind and not noop then
+                return fail('composition_failed','required operation intersects preserved seam',{x=p.x,y=y,z=p.z})
+            end
+            if kind and not exact and not write(p,y,kind,material,entry) then
                 return fail('write_budget', 'deduplicated write limit exceeded', {x=p.x,y=y,z=p.z}, {limit=cap,observed=#writes+1})
             end
         end
+    end
+    if growth then
+        for _,p in ipairs(request.start_seam.preserved) do expectations[#expectations+1]=copy(p) end
     end
     if has_connector then
         local function k(p) return p.x..':'..p.y..':'..p.z end
@@ -245,7 +275,8 @@ function plans.compose(terrain, route, config)
         if k ~= "road_material" then parameters[k] = copy(v) end
     end
     parameters.road_material = config.road_material
-    return {version=has_connector and 2 or 1, connector_version=has_connector and 1 or nil, planner_version=1, raster_version=1, owner=terrain.owner,
+    return {version=growth and 3 or has_connector and 2 or 1, seam_version=growth and 1 or nil,
+        connector_version=has_connector and 1 or nil, planner_version=1, raster_version=1, owner=terrain.owner,
         request=copy(request), endpoints=copy(request.provenance), survey_bounds=copy(terrain.bounds),
         centerline=copy(route.centerline), headings=copy(route.headings), parameters=parameters,
         cost=route.cost, metrics=metrics, writes=writes, expectations=expectations}

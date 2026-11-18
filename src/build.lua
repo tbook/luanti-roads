@@ -1,6 +1,8 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 -- Load existing mapblocks in small batches, then validate and write without yielding.
 local build={}
+local seam,raster
+function build.set_seam_dependencies(s,r) seam,raster=s,r end
 local function fail(code,reason) return {code=code,reason=reason} end
 local function equal(a,b)
     if type(a)~=type(b) then return false end
@@ -17,6 +19,24 @@ local function valid_position(p)
     end
     return true
 end
+local function dense_array(t,limit)
+    if type(t)~='table' or #t>limit then return false end
+    local count=0
+    for k in pairs(t) do
+        if type(k)~='number' or k~=math.floor(k) or k<1 or k>#t then return false end
+        count=count+1
+    end
+    return count==#t
+end
+function build.validate_surface_steps(surfaces)
+    for _,p in pairs(surfaces) do
+        for _,d in ipairs({{1,0},{0,1}}) do
+            local neighbor=surfaces[(p.x+d[1])..':'..(p.z+d[2])]
+            if neighbor and math.abs(neighbor.y-p.y)>1 then return false end
+        end
+    end
+    return true
+end
 function build.new(plan,ops,done)
     if type(plan)~='table' or type(plan.owner)~='string' or type(plan.writes)~='table'
         or type(plan.expectations)~='table' then
@@ -28,9 +48,11 @@ function build.new(plan,ops,done)
     local e=plan.endpoints or {}
     local provenance=plan.request and plan.request.provenance or {}
     local has_connector=(e.start and e.start.connector) or (e.goal and e.goal.connector)
-    if (plan.version~=1 and plan.version~=2)
+    if (plan.version~=1 and plan.version~=2 and plan.version~=3)
         or (plan.version==1 and (plan.connector_version~=nil or has_connector))
         or (plan.version==2 and (plan.connector_version~=1 or not has_connector))
+        or (plan.version==3 and (plan.seam_version~=1 or plan.connector_version~=nil or has_connector))
+        or (plan.version~=3 and plan.seam_version~=nil)
         or plan.connector or plan.connectors or e.connector or e.connectors
         or provenance.connector or provenance.connectors
         or (e.start and e.start.connectors) or (e.goal and e.goal.connectors)
@@ -39,6 +61,143 @@ function build.new(plan,ops,done)
         or (plan.version==1 and ((provenance.start and provenance.start.connector)
             or (provenance.goal and provenance.goal.connector))) then
         return nil,fail('build_failed','unsupported plan version or connector')
+    end
+    if plan.version==3 then
+        local request=plan.request
+        local patch=request and request.start_seam
+        local ok=seam and raster and seam.validate(raster,patch)
+        if not ok or type(ops)~='table' or type(ops.classify)~='function'
+            or type(request.provenance)~='table' or type(e.start)~='table'
+            or type(e.goal)~='table' or not valid_position(request.start) or not valid_position(request.goal)
+            or not equal(e.start.resolved,request.start) or not equal(e.goal.resolved,request.goal)
+            or e.start.origin~='growth_seam' or not equal(e,request.provenance)
+            or request.start_heading~=patch.heading or not equal(request.start,patch.endpoint)
+            or type(plan.parameters)~='table' or plan.parameters.road_material~='mcl_core:cobble'
+            or not dense_array(plan.centerline,1024) or #plan.centerline<2
+            or not dense_array(plan.headings,1023) or #plan.headings~=#plan.centerline-1
+            or not dense_array(plan.expectations,50000) or not dense_array(plan.writes,10000)
+            or not equal(plan.centerline[1],request.start) or not equal(plan.centerline[#plan.centerline],request.goal) then
+            return nil,fail('build_failed','invalid growth seam provenance or route')
+        end
+        local exact,written,observed={},{},{}
+        local function key(p) return p.x..':'..p.y..':'..p.z end
+        for _,p in ipairs(plan.expectations) do
+            if not valid_position(p) or observed[key(p)] then return nil,fail('build_failed','invalid growth expectations') end
+            observed[key(p)]=p
+            if p.name~=nil then exact[key(p)]=p end
+        end
+        for _,p in ipairs(plan.writes) do
+            if not valid_position(p) or written[key(p)] or not observed[key(p)]
+                or (p.kind~='road' and p.kind~='air' and p.kind~='fill')
+                or (p.kind=='fill' and (type(p.material)~='string' or p.material=='')) then
+                return nil,fail('build_failed','invalid or uninspected growth write')
+            end
+            written[key(p)]=p
+        end
+        for _,p in ipairs(patch.preserved) do
+            local q=exact[key(p)]
+            if not q or not equal(p,q) or written[key(p)] then
+                return nil,fail('build_failed','incomplete or written seam preservation')
+            end
+            exact[key(p)]=nil
+        end
+        if next(exact) then return nil,fail('build_failed','unattributed exact expectation') end
+        local dirs={{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1}}
+        local heading=patch.heading
+        local route_surfaces={}
+        local prior={columns=patch.surfaces}
+        for i,h in ipairs(plan.headings) do
+            local a,b=plan.centerline[i],plan.centerline[i+1]
+            if not valid_position(a) or not valid_position(b) or type(h)~='number' or h~=math.floor(h) or h<0 or h>7
+                or b.x-a.x~=4*dirs[h+1][1] or b.z-a.z~=4*dirs[h+1][2]
+                or math.min(math.abs(h-heading),8-math.abs(h-heading))>1 then
+                return nil,fail('build_failed','invalid growth route heading')
+            end
+            local edge=raster.segment(a,b)
+            if not edge or edge.grade>0.25 or not raster.join(prior,edge)
+                or not raster.join({columns=patch.surfaces},edge) then
+                return nil,fail('build_failed','invalid growth route geometry')
+            end
+            for _,p in ipairs(edge.columns) do
+                local k=p.x..':'..p.z
+                if route_surfaces[k] and route_surfaces[k].y~=p.y then
+                    return nil,fail('build_failed','conflicting growth surface heights')
+                end
+                route_surfaces[k]=p
+            end
+            prior=edge; heading=h
+        end
+        local function state(p,y)
+            local id=p.x..':'..y..':'..p.z
+            local entry=observed[id]
+            if entry and entry.name then
+                entry=ops.classify({name=entry.name,param2=entry.param2},entry.has_metadata)
+            end
+            return entry,written[id]
+        end
+        if not build.validate_surface_steps(route_surfaces) then
+            return nil,fail('build_failed','adjacent growth surfaces exceed one node')
+        end
+        for _,p in pairs(route_surfaces) do
+            local road,write=state(p,p.y)
+            if not road or not ((road.kind=='natural' and road.material=='mcl_core:cobble' and not write)
+                or (write and write.kind=='road')) then
+                return nil,fail('build_failed','missing road expectation or required write')
+            end
+            for y=p.y+1,p.y+3 do
+                local entry,w=state(p,y)
+                if not entry or not ((entry.kind=='air' and not w) or (entry.kind~='air' and w and w.kind=='air')) then
+                    return nil,fail('build_failed','missing clearance expectation or required write')
+                end
+            end
+            local supported=false
+            local fills={}
+            for y=p.y-1,p.y-2,-1 do
+                local entry,w=state(p,y)
+                if not entry then return nil,fail('build_failed','missing support expectation') end
+                if entry.kind=='natural' and not w then
+                    for _,fill in ipairs(fills) do
+                        if fill.material~=entry.material then
+                            return nil,fail('build_failed','fill differs from natural support material')
+                        end
+                    end
+                    supported=true; break
+                end
+                if not w or w.kind~='fill' or (entry.kind~='air' and entry.kind~='replaceable') then
+                    return nil,fail('build_failed','missing required fill')
+                end
+                fills[#fills+1]=w
+            end
+            if not supported then return nil,fail('build_failed','missing natural fill support') end
+        end
+        for _,p in ipairs(plan.writes) do
+            local surface=route_surfaces[p.x..':'..p.z]
+            local entry=observed[key(p)]
+            if not surface or p.y<surface.y-1 or p.y>surface.y+3
+                or (p.y==surface.y and p.kind~='road')
+                or (p.y<surface.y and p.kind~='fill')
+                or (p.y>surface.y and p.kind~='air')
+                or entry.protected~=false
+                or (entry.kind~='natural' and entry.kind~='air' and entry.kind~='replaceable') then
+                return nil,fail('build_failed','write outside growth geometry')
+            end
+        end
+        -- A preserved overlap is already constructed only if it has a road,
+        -- solid support and clear headroom. This rejects a removed required
+        -- road, fill, cut or clearance operation independently of composition.
+        local nodes={}
+        for _,p in ipairs(patch.preserved) do nodes[key(p)]=p end
+        for _,p in ipairs(patch.surfaces) do
+            local function at(y) return nodes[p.x..':'..y..':'..p.z] end
+            local road,support=at(p.y),at(p.y-1)
+            local classified=support and ops.classify({name=support.name,param2=support.param2},false)
+            if not road or road.name~='mcl_core:cobble' or not classified or classified.kind~='natural' then
+                return nil,fail('build_failed','seam road or support requires construction')
+            end
+            for y=p.y+1,p.y+3 do
+                if not at(y) or at(y).name~='air' then return nil,fail('build_failed','seam headroom requires construction') end
+            end
+        end
     end
     if plan.version==2 then
         local exact, written = {}, {}
@@ -126,15 +285,17 @@ function build.new(plan,ops,done)
             local node=ops.access.get_node(p)
             local meta=node and ops.access.has_metadata(p)
             local entry=ops.classify(node,meta)
-            if ops.has_timer(p) then
-                return finish(fail('stale_plan','a node timer is active in the construction footprint'))
+            local timer=ops.has_timer(p)
+            if timer or (plan.version==3 and p.name~=nil and timer~=false) then
+                return finish(fail(plan.version==3 and p.name~=nil and 'seam_changed' or 'stale_plan',
+                    'a node timer is active or unknown in the construction footprint'))
             end
             local protected=ops.access.is_protected(p,plan.owner)
             if p.name ~= nil then
-                if plan.version~=2 or not node or node.name~=p.name
+                if (plan.version~=2 and plan.version~=3) or not node or node.name~=p.name
                     or node.param2~=p.param2 or meta~=p.has_metadata
                     or protected~=p.protected then
-                    return finish(fail('stale_plan','connector changed at '..p.x..','..p.y..','..p.z))
+                    return finish(fail(plan.version==3 and 'seam_changed' or 'stale_plan','preserved node changed at '..p.x..','..p.y..','..p.z))
                 end
             else
             local melted_snow=p.kind=='replaceable' and p.material=='mcl_core:snow'
