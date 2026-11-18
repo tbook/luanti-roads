@@ -146,6 +146,19 @@ patch at 512 exact nodes. If the patch cannot fit, fail before any write. Two
 edges cover the immediate join; this does not authorize overlap with any older
 part of the road. Check such overlap against the stored road footprint as well.
 
+Implementation clarification: retain the last three centerline points (or both
+points for a one-edge source), not just the immediately previous point. The
+canonical patch is the joined raster of those edges, clipped to the source
+plan's actual footprint. Record the bottom of the original construction band
+for each surface column and every exact final node through three nodes above the
+surface. These bounds come from the validated source plan, not the current
+world. Semantic source expectations alone do not contain exact node names or
+param2: capture exact pre-write states, verify them against the source plan,
+overlay its writes, and persist the resulting intended states before writing.
+The builder must independently check structure and reject missing expectations,
+preserved writes and geometry that would require a removed write. Slice B owns
+authentication against the durable source record and post-write readback.
+
 Read and validate every seam node, metadata, timer and protection before search,
 and again in the synchronous construction preflight. Unknown, missing or edited
 seams stop with `seam_changed`; never repair them. Preserve exact param2 even

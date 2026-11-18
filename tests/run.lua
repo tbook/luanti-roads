@@ -301,3 +301,6 @@ dofile("tests/preview.lua")
 dofile("tests/presentation.lua")
 
 dofile("tests/build.lua")
+dofile("tests/seam.lua")
+dofile("tests/growth_seam.lua")
+dofile("tests/growth_geometry.lua")
