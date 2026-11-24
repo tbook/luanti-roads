@@ -22,6 +22,7 @@ local outward_store=load("src/outward_store.lua")
 local outward=load("src/outward.lua")
 local growth_store=load("src/growth_store.lua")
 local growth=load("src/growth.lua")
+local growth_policy=load("src/growth_policy.lua")
 local outward_policy=load("src/outward_policy.lua")
 
 assert(edges.set_raster(raster))
@@ -100,14 +101,16 @@ do
         serialize=core.serialize,
         deserialize=function(text) return core.deserialize(text,true) end,
         now=os.time})
-    -- Growth lifecycle (slice B). No commands or scheduler use it yet; the
-    -- outward service records growth seeds and consults incoming claims.
+    -- Growth lifecycle. /roads_grow drives it; no scheduler does. No destination
+    -- or final-attachment providers are installed until the Towns provider lands,
+    -- so cycles scan nothing and grow directionally. The outward service records
+    -- growth seeds and consults incoming claims.
     local growth_storage={get=function(key) local v=mod_storage:get_string(key); if v=="" then return nil end return v end,
         set=function(key,value) mod_storage:set_string(key,value) end}
     local growth_db=growth_store.new({storage=growth_storage,serialize=core.serialize,
         deserialize=function(text) return core.deserialize(text,true) end,now=os.time})
     local outward_service
-    local growth_service,growth_error=growth.new({store=growth_db,jobs=controller,now=now,after=ops.after,
+    local growth_service,growth_error=growth.new({policy=growth_policy,store=growth_db,jobs=controller,now=now,after=ops.after,
         raster=raster,seam=seam,access=access,has_timer=function(pos) return core.get_node_timer(pos):is_started() end,
         classify=surface.classify,load_area=function(minp,maxp) return core.load_area(minp,maxp) end,
         world_config=world_config,survey=survey,start_survey=ops.start_survey,new_planner=ops.new_planner,

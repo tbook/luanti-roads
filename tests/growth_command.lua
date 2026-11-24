@@ -97,7 +97,7 @@ test('adoption reports headings, seam and state, and repeating it changes nothin
     assert(msg:find('Growth road '..road_id..' is adopted from outward operation '..status.op_id, 1, true), msg)
     assert(msg:find('Growth road '..road_id..': open, revision 1, endpoint (48.0, 0.0, 0.0)', 1, true), msg)
     assert(msg:find('Local heading 0 toward (1, 0); preferred outward (1, 0)', 1, true), msg)
-    assert(msg:find('Destinations: none are scanned yet', 1, true) and msg:find('Seam: not compared here', 1, true), msg)
+    assert(msg:find('Destinations: no scan is recorded yet', 1, true) and msg:find('Seam: not compared here', 1, true), msg)
     local before = h.road(road_id)
     ok, msg = run(cmds, 'adopt '..status.op_id)
     assert(ok and msg:find('Adopting it again changes nothing', 1, true), msg)
@@ -121,7 +121,9 @@ test('one extension at a time; the active cycle is shown and the published endpo
     h.run_until(function() return h.growth.active == nil end)
     ok, msg = run(cmds, 'status '..road_id)
     assert(ok and msg:find('revision 2, endpoint (144.0, 0.0, 0.0)', 1, true), msg)
-    assert(msg:find('Attempt on '..road_id..':s2:r1 from revision 1: built; 96 nodes composed', 1, true), msg)
+    assert(msg:find('Attempt on '..road_id..':s2:r1 from revision 1: built (directional); 96 node fallback composed', 1, true), msg)
+    assert(msg:find('Destinations: scan disabled (no destination provider is installed)', 1, true), msg)
+    assert(msg:find('Selected: none; directional fallback (96 then 64 nodes)', 1, true), msg)
     assert(msg:find('Last segment '..road_id..':s2:r1.', 1, true), msg)
     -- A second, explicit cycle chains on the new seam and publishes the next endpoint.
     ok, msg = run(cmds, 'extend '..road_id)
@@ -262,6 +264,8 @@ test('the road is found from durable state after a restart and an interrupted cy
     assert(h.road(road_id).revision == 2)
 end)
 
+local BUDGETS = {chunks = 96, expansions = 150000, destination_chunks = 64, reserved_chunks = 32,
+    destination_expansions = 50000, reserved_expansions = 50000, attempts = 4}
 test('presentation is bounded: the latest four attempts, capped lists and the explanation for uncertain work', function()
     local attempts = {}
     for i = 1, 6 do
@@ -271,24 +275,25 @@ test('presentation is bounded: the latest four attempts, capped lists and the ex
     local text = commands.growth_summary({road_id = 'growth:v1:op', state = 'uncertain', revision = 1,
         endpoint = {x = 48, y = 0, z = 0}, local_heading = 2, preferred = {x = 0, z = 1}, segments = 3,
         source = {settlement_id = SID, exit_id = EAST}, origin_op_id = 'op', attempts = attempts,
-        budgets = {chunks = 96, expansions = 150000}, active = false,
+        budgets = BUDGETS, active = false,
         pending = {segment_id = 'seg-pending', state = 'uncertain', writes = 'unknown'},
         stop = {code = 'cancelled', reason = 'cancelled after construction started; writes are unknown'},
         explanation = 'Writes may have happened. The reservation is kept.'})
     assert(text:find('Local heading 2 toward (0, 1); preferred outward (0, 1)', 1, true), text)
     assert(text:find('Unfinished segment seg-pending: uncertain, writes unknown.', 1, true), text)
-    assert(text:find('Destinations: none are scanned yet', 1, true), text)
-    assert(text:find('Limits per cycle: 96 chunks, 150000 expansions.', 1, true), text)
+    assert(text:find('Destinations: no scan is recorded yet', 1, true), text)
+    assert(text:find('Limits per cycle: 96 chunks (64 for destinations, 32 reserved for fallback), 150000 expansions (50000 per destination attempt, 50000 reserved for fallback), 4 attempts.', 1, true), text)
     assert(text:find('Stop: cancelled: cancelled after construction started; writes are unknown.', 1, true), text)
     assert(text:find('Writes may have happened.', 1, true), text)
     assert(not text:find('seg1 ', 1, true) and not text:find('seg2 ', 1, true), 'only the latest four attempts are shown')
-    assert(text:find('Attempt on seg6 from revision 1: blocked; 96 nodes bounded_no_route - no route 6; 6 chunks, 60 expansions.', 1, true), text)
+    assert(text:find('Attempt on seg6 from revision 1: blocked; 96 node fallback bounded_no_route - no route 6; 6 chunks, 60 expansions.', 1, true), text)
     local active = commands.growth_summary({road_id = 'growth:v1:op', state = 'open', revision = 1,
         endpoint = {x = 0, y = 0, z = 0}, local_heading = 0, preferred = {x = 1, z = 0}, segments = 1, source = {},
-        attempts = {}, budgets = {chunks = 96, expansions = 150000, used_chunks = 3, used_expansions = 900},
+        attempts = {}, budgets = {chunks = 96, expansions = 150000, destination_chunks = 64, reserved_chunks = 32, destination_expansions = 50000,
+            reserved_expansions = 50000, attempts = 4, used_chunks = 3, used_expansions = 900},
         active = true, stage = 'surveying', pending = {segment_id = 'seg-live', state = 'planning', writes = 'none'}})
     assert(active:find('Current cycle: stage surveying, segment seg-live.', 1, true), active)
-    assert(active:find('Limits per cycle: 96 chunks, 150000 expansions (used 3 chunks, 900 expansions).', 1, true), active)
+    assert(active:find('4 attempts (used 3 chunks, 900 expansions).', 1, true), active)
     assert(commands.growth_summary(nil) == 'No growth road is recorded for this identifier.')
 end)
 

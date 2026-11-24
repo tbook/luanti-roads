@@ -14,6 +14,7 @@ local outward = dofile('src/outward.lua')
 local outward_store = dofile('src/outward_store.lua')
 local growth = dofile('src/growth.lua')
 local growth_store = dofile('src/growth_store.lua')
+local growth_policy = dofile('src/growth_policy.lua')
 local fx = dofile('tests/outward_fixture.lua')
 assert(edges.set_raster(raster)); assert(planner.set_edges(edges)); assert(plans.set_dependencies(raster, edges))
 planner.set_seam_dependencies(seam, raster); plans.set_seam_dependency(seam); build.set_seam_dependencies(seam, raster)
@@ -29,6 +30,7 @@ local function harness(options)
     local h = {time = 0, queue = {}, events = {}, builds = 0, surveys = 0, writes = 0, nodes = {}, meta = {},
         storage = options.storage or fx.storage(), logs = {}}
     h.jobs = {active = nil}
+    h.providers, h.attachments = {}, {}   -- fake destination and final-attachment providers, by kind
     function h.jobs:hold(holder)
         if self.active then return nil, {code = 'busy', reason = 'another road job owns the server slot'} end
         self.active = {holder = holder, external = true}; return self.active
@@ -81,6 +83,7 @@ local function harness(options)
         h.surveys = h.surveys + 1
         h.events[#h.events + 1] = 'survey'
         if h.survey_error then return nil, h.survey_error end
+        if h.survey_script then return h.survey_script(a, b, owner) end
         local terrain = terrain_for(rect(a, b)); terrain.owner = owner
         local job = {state = 'succeeded'}
         function job:status() return {status = self.state, terrain = terrain, metrics = {}} end
@@ -153,8 +156,10 @@ local function harness(options)
     local config = {world = {chunksize = 5}, planner = {weights = {slope = 4, turn = 2, cut = 1, fill = 1}, road_material = COBBLE},
         composition = {road_material = COBBLE}}
     local function new_planner(terrain, request, c)
-        if h.on_planner then h.on_planner(terrain, request) end
-        return planner.new(terrain, request, c)
+        if h.on_planner then h.on_planner(terrain, request, c) end
+        local job, err = planner.new(terrain, request, c)
+        if job and h.planner_wrap then return h.planner_wrap(job, c, request) end
+        return job, err
     end
     local function compose(terrain, route, c) return plans.compose(terrain, route, c) end
 
@@ -164,7 +169,8 @@ local function harness(options)
         h.store = outward_store.new({storage = h.storage, serialize = fx.serialize, deserialize = fx.deserialize,
             now = function() return 1000 + h.time end})
         local outward_service
-        h.growth = assert(growth.new({store = h.growth_store, jobs = h.jobs, now = function() return h.time end,
+        h.growth = assert(growth.new({policy = growth_policy, providers = h.providers, attachments = h.attachments,
+            destination_unavailable = function(d) if h.unavailable then return h.unavailable(d) end end, store = h.growth_store, jobs = h.jobs, now = function() return h.time end,
             after = h.after, raster = raster, seam = seam, access = h.access, has_timer = has_timer,
             classify = surface.classify, load_area = function() end, world_config = function() return config end,
             survey = h.survey, start_survey = h.start_survey, new_planner = new_planner, compose = compose,

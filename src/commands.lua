@@ -192,6 +192,51 @@ local GROW_ACTIONS={adopt=true,extend=true,status=true,cancel=true,retry=true,re
 local GROW_USAGE="Usage: /roads_grow adopt <outward-op-id> | extend|status|cancel|retry|retire|inspect <road-id>."
 local GROW_ITEMS=4
 
+local function growth_target(t)
+    if t.kind=="destination" then
+        return "destination "..tostring(t.approach_id).." ("..tostring(t.mode)..")"
+    end
+    return tostring(t.length).." node fallback"
+end
+
+-- Scan, selection and rejection lines of a growth summary.
+function commands.growth_destination_lines(s)
+    local lines={}
+    local scan=s.scan
+    if type(scan)~="table" then
+        lines[1]="Destinations: no scan is recorded yet."
+        return lines
+    end
+    if scan.status=="disabled" then
+        lines[1]="Destinations: scan disabled (no destination provider is installed); growth targets the preferred direction only."
+    else
+        local names={}
+        for _,kind in ipairs({"town","village","road"}) do
+            if scan.providers and scan.providers[kind] then names[#names+1]=kind.."="..tostring(scan.providers[kind]) end
+        end
+        lines[1]=string.format("Destinations: scan %s (%s); %d descriptors inspected.",tostring(scan.status),
+            table.concat(names,", "),tonumber(scan.inspected) or 0)
+    end
+    local candidates=type(s.candidates)=="table" and s.candidates or {}
+    if #candidates==0 then
+        lines[#lines+1]="Selected: none; directional fallback (96 then 64 nodes) is attempted."
+    else
+        for i,c in ipairs(candidates) do
+            lines[#lines+1]=string.format("%s: %s %s approach %s, %s attachment, %s nodes away%s.",i==1 and "Selected" or "Next candidate",
+                tostring(c.kind),tostring(c.id),tostring(c.approach_id),tostring(c.mode),tostring(c.distance),
+                c.mode=="waypoint" and " (waypoint: partial progress only)" or "")
+        end
+        lines[#lines+1]="Directional fallback (96 then 64 nodes) follows if no destination attempt succeeds."
+    end
+    local rejected=type(s.rejected)=="table" and s.rejected or {}
+    local total=tonumber(scan.rejected_total) or #rejected
+    for i=1,math.min(#rejected,GROW_ITEMS) do
+        lines[#lines+1]="Rejected "..tostring(rejected[i].kind).." approach "..tostring(rejected[i].approach_id)..": "..tostring(rejected[i].reason).."."
+    end
+    if total>math.min(#rejected,GROW_ITEMS) then lines[#lines+1]=(total-math.min(#rejected,GROW_ITEMS)).." more rejected destinations are not listed." end
+    return lines
+end
+
 -- Presentation of a growth-service summary (see src/growth.lua status).
 function commands.growth_summary(s)
     if type(s)~="table" then return "No growth road is recorded for this identifier." end
@@ -210,22 +255,34 @@ function commands.growth_summary(s)
     elseif s.last_segment_id then
         lines[#lines+1]="Last segment "..tostring(s.last_segment_id).."."
     end
-    lines[#lines+1]="Destinations: none are scanned yet; growth targets the preferred direction only."
+    for _,line in ipairs(commands.growth_destination_lines(s)) do lines[#lines+1]=line end
     local attempts=type(s.attempts)=="table" and s.attempts or {}
     for i=math.max(1,#attempts-GROW_ITEMS+1),#attempts do
         local a=attempts[i]
         local targets={}
         for _,t in ipairs(type(a.targets)=="table" and a.targets or {}) do
-            targets[#targets+1]=tostring(t.length).." nodes "..tostring(t.outcome)..(t.reason and (" - "..tostring(t.reason)) or "")
+            targets[#targets+1]=growth_target(t).." "..tostring(t.outcome)..(t.reason and (" - "..tostring(t.reason)) or "")
         end
-        lines[#lines+1]=string.format("Attempt on %s from revision %s: %s%s; %d chunks, %d expansions.",
-            tostring(a.segment_id),tostring(a.from_revision),tostring(a.outcome),
+        lines[#lines+1]=string.format("Attempt on %s from revision %s: %s%s%s; %d chunks, %d expansions.",
+            tostring(a.segment_id),tostring(a.from_revision),tostring(a.outcome),a.result and (" ("..tostring(a.result)..")") or "",
             #targets>0 and ("; "..table.concat(targets,"; ")) or "",a.chunks or 0,a.expansions or 0)
     end
     local b=type(s.budgets)=="table" and s.budgets or {}
-    lines[#lines+1]=string.format("Limits per cycle: %s chunks, %s expansions%s.",tostring(b.chunks),tostring(b.expansions),
+    lines[#lines+1]=string.format("Limits per cycle: %s chunks (%s for destinations, %s reserved for fallback), %s expansions (%s per destination attempt, %s reserved for fallback), %s attempts%s.",
+        tostring(b.chunks),tostring(b.destination_chunks),tostring(b.reserved_chunks),tostring(b.expansions),
+        tostring(b.destination_expansions),tostring(b.reserved_expansions),tostring(b.attempts),
         s.active and string.format(" (used %d chunks, %d expansions)",b.used_chunks or 0,b.used_expansions or 0) or "")
-    if s.stop then lines[#lines+1]=(s.state=="stopped" and "Blocked: " or "Stop: ")..failure(s.stop) end
+    if s.stop then
+        lines[#lines+1]=(s.state=="stopped" and "Blocked: " or "Stop: ")..failure(s.stop)
+        local attempted={}
+        for _,e in ipairs(type(s.stop.attempted)=="table" and s.stop.attempted or {}) do
+            attempted[#attempted+1]=growth_target(e).." "..tostring(e.outcome)
+        end
+        if #attempted>0 then lines[#lines+1]="Attempted: "..table.concat(attempted,"; ").."." end
+    end
+    if s.connected then
+        lines[#lines+1]=string.format("Connected to %s %s (approach %s).",tostring(s.connected.kind),tostring(s.connected.id),tostring(s.connected.approach_id))
+    end
     if s.retired then lines[#lines+1]=string.format("Retired by %s; was %s.",tostring(s.retired.by),tostring(s.retired.was)) end
     if s.explanation then lines[#lines+1]=s.explanation end
     lines[#lines+1]="Seam: not compared here; /roads_grow inspect compares the intended seam with the world. Adopt, extend and retry refuse an edited seam."

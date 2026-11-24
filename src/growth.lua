@@ -1,6 +1,7 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 -- Road growth lifecycle: seed recording for outward roads, explicit adoption,
--- one bounded directional continuation cycle, and conservative status,
+-- one bounded destination-aware continuation cycle (sequential destination
+-- attempts, then reserved directional fallback), and conservative status,
 -- cancel, retry, retire and inspect operations. This module owns the durable
 -- ordering (intent, prepared segment, registry reservation, durability wait,
 -- single build, publication). Surveying, planning, composition and building
@@ -8,9 +9,14 @@
 -- releases an uncertain reservation and never repairs player edits.
 local growth = {}
 
-local MAX_CHUNKS = 96
+-- Shared cycle budget partition (design: "One destination-aware cycle").
+local MAX_CHUNKS = 96             -- distinct mapchunks in the whole cycle
+local DEST_CHUNKS = 64            -- destination attempts stop here; 32 stay for fallback
 local MAX_EXPANSIONS = 150000
-local TARGET_LENGTHS = {96, 64}   -- deterministic forward targets, nodes
+local DEST_EXPANSIONS = 50000     -- per destination attempt
+local RESERVED_EXPANSIONS = 50000 -- never spent by destination attempts
+local MAX_ATTEMPTS = 4            -- 2 destination + 2 fallback
+local MAX_REJECTED = 8            -- rejected destinations kept in an attempt summary
 local MAX_CENTERLINE = 1024
 local MAX_COLUMNS = 50000
 local MAX_SAMPLES = 16            -- mismatches reported by inspect
@@ -41,7 +47,7 @@ local function cardinal(d)
     return type(d) == "table" and integer(d.x) and integer(d.z) and math.abs(d.x) + math.abs(d.z) == 1
 end
 
-local REQUIRED = {"store", "jobs", "now", "after", "raster", "seam", "access", "has_timer", "classify",
+local REQUIRED = {"policy", "store", "jobs", "now", "after", "raster", "seam", "access", "has_timer", "classify",
     "load_area", "world_config", "survey", "start_survey", "new_planner", "compose", "start_build",
     "save_interval", "find_operation"}
 
@@ -52,6 +58,7 @@ function growth.new(ops)
         end
     end
     local store, jobs, raster, seam, access = ops.store, ops.jobs, ops.raster, ops.seam, ops.access
+    local policy = ops.policy
     local self = {active = nil}
 
     local function log(level, message)
@@ -407,13 +414,19 @@ function growth.new(ops)
     }
     local function summarize(road_id, road)
         local act = self.active and self.active.road_id == road_id and self.active or nil
+        local latest = road.attempts and road.attempts[#road.attempts] or nil
+        local view = act and {scan = act.scan, candidates = act.candidates, rejected = act.rejected} or latest or {}
         return {road_id = road_id, origin_op_id = road.origin_op_id, source = copy(road.source), state = road.state,
             revision = road.revision, endpoint = copy(road.endpoint), local_heading = road.local_heading,
             preferred = copy(road.preferred), last_segment_id = road.last_segment_id, activation = road.activation,
             segments = #road.segments, pending = copy(road.pending), stop = copy(road.stop),
             retired = copy(road.retired), attempts = trimmed(road), next_seq = road.next_seq,
             stage = act and act.stage or nil, active = act ~= nil, explanation = CONSERVATIVE[road.state],
-            budgets = {chunks = MAX_CHUNKS, expansions = MAX_EXPANSIONS,
+            scan = copy(view.scan), candidates = copy(view.candidates), rejected = copy(view.rejected),
+            result = latest and latest.result or nil, connected = copy(road.connected),
+            budgets = {chunks = MAX_CHUNKS, expansions = MAX_EXPANSIONS, destination_chunks = DEST_CHUNKS,
+                reserved_chunks = MAX_CHUNKS - DEST_CHUNKS, destination_expansions = DEST_EXPANSIONS,
+                reserved_expansions = RESERVED_EXPANSIONS, attempts = MAX_ATTEMPTS,
                 used_chunks = act and act.agg.chunks or nil, used_expansions = act and act.agg.expansions or nil}}
     end
     local function notify(road_id)
@@ -459,16 +472,18 @@ function growth.new(ops)
         return true
     end
 
-    local function push_attempt(road, act, outcome, err)
+    local function push_attempt(road, act, outcome, err, result)
         road.attempts = road.attempts or {}
         road.attempts[#road.attempts + 1] = {segment_id = act.segment_id, sequence = act.sequence,
             from_revision = act.from_revision, outcome = outcome, code = err and err.code, reason = err and err.reason,
+            result = result, scan = copy(act.scan), candidates = copy(act.candidates), rejected = copy(act.rejected),
             targets = copy(act.log), chunks = act.agg.chunks, expansions = act.agg.expansions}
         while #road.attempts > store.LIMITS.attempts do table.remove(road.attempts, 1) end
     end
 
     local function stop_fields(err)
-        return {code = err.code, reason = err.reason, position = copy(err.position), limit = err.limit, observed = err.observed}
+        return {code = err.code, reason = err.reason, position = copy(err.position), limit = err.limit, observed = err.observed,
+            attempted = copy(err.attempted)}
     end
 
     -- Known zero writes: release this segment's intent, reservation and claims.
@@ -510,6 +525,13 @@ function growth.new(ops)
 
     local function finish_zero(act, err, outcome)
         if self.active ~= act then return end
+        if err.attempted == nil and #act.log > 0 then
+            err.attempted = {}
+            for _, e in ipairs(act.log) do
+                err.attempted[#err.attempted + 1] = {kind = e.kind, length = e.length, approach_id = e.approach_id,
+                    mode = e.mode, outcome = e.outcome}
+            end
+        end
         end_cycle(act)
         release_zero(act, err, outcome)
         notify(act.road_id)
@@ -537,7 +559,8 @@ function growth.new(ops)
     local next_attempt
 
     local function record_attempt(act, outcome, err)
-        act.log[#act.log + 1] = {length = act.length, outcome = outcome, reason = err and err.reason,
+        local a = act.attempt or {}
+        act.log[#act.log + 1] = {kind = a.kind, mode = a.mode, approach_id = a.approach_id, length = a.length, outcome = outcome, reason = err and err.reason,
             position = err and copy(err.position), chunks_new = act.attempt_chunks or 0,
             expansions = act.attempt_expansions or 0}
         act.last_error = err
@@ -578,6 +601,22 @@ function growth.new(ops)
             return finish_uncertain(act, error_result("storage_failed", "the segment result could not be saved: "
                 .. tostring(save_err.reason)), "all")
         end
+        -- Only a verified final attachment is "connected"; a waypoint or a
+        -- directional segment is never reported as arrival.
+        local attempt = act.attempt or {}
+        local result = attempt.kind ~= "destination" and "directional"
+            or (attempt.mode == "final" and "connected" or "partial_progress")
+        if result == "connected" then
+            local att = act.attachment
+            local called, verified, why = false, nil, nil
+            if att and type(att.verify) == "function" then
+                called, verified, why = pcall(att.verify, att, {plan = act.plan, endpoint = copy(record.next_seam.endpoint)})
+            end
+            if not called or not verified then
+                return finish_uncertain(act, error_result("attachment_unverified", "the final attachment could not be verified"
+                    .. " after construction: " .. tostring(type(why) == "table" and why.reason or why or "no verifier")), "all")
+            end
+        end
         local updated, update_err = store:update(function(d)
             local road = d.roads[act.road_id]
             if not road or road.state ~= "building" or not road.pending or road.pending.segment_id ~= sid
@@ -594,7 +633,12 @@ function growth.new(ops)
             road.endpoint = copy(record.next_seam.endpoint); road.local_heading = record.next_seam.heading
             road.last_segment_id = sid; road.state = "open"; road.pending = nil; road.stop = nil
             road.activation = "needs_departure"
-            push_attempt(road, act, "built")
+            if result == "connected" then
+                local d = attempt.descriptor
+                road.state = "connected"
+                road.connected = {kind = d.kind, id = d.id, approach_id = d.approach_id, revision = d.revision, segment_id = sid}
+            end
+            push_attempt(road, act, "built", nil, result)
             return true
         end)
         if not updated then
@@ -631,6 +675,13 @@ function growth.new(ops)
             local stored = store:claim(claim.id)
             if not stored or stored.segment_id ~= sid then
                 return finish_zero(act, error_result("claim_conflict", "claim " .. claim.id .. " is no longer held by this segment"))
+            end
+        end
+        if act.attachment and type(act.attachment.recheck) == "function" then
+            local called, fresh, why = pcall(act.attachment.recheck, act.attachment, copy(act.attempt.descriptor))
+            if not called or not fresh then
+                return finish_zero(act, error_result("stale_destination", "the destination changed or can no longer be attached: "
+                    .. tostring(type(why) == "table" and why.reason or why or fresh)))
             end
         end
         local good, why = check_seam(act.patch, act.start_owner)
@@ -692,7 +743,10 @@ function growth.new(ops)
             owner = act.owner, geometry_version = 1, policy_version = 1,
             centerline = copy(plan.centerline), headings = copy(plan.headings),
             start_seam = copy(act.patch), next_seam = derived, footprint = summary,
-            destination = nil, attempts = copy(act.log), aggregate = copy(act.agg),
+            destination = act.attempt.kind == "destination" and {kind = act.attempt.descriptor.kind,
+                id = act.attempt.descriptor.id, approach_id = act.attempt.approach_id, mode = act.attempt.mode,
+                revision = act.attempt.descriptor.revision, position = copy(act.attempt.descriptor.position)} or nil,
+            attempts = copy(act.log), aggregate = copy(act.agg),
             writes = #plan.writes, state = "prepared", created_at = store:now()}
         local bytes, save_err = store:save_record(record)
         if not bytes then return finish_zero(act, save_err) end
@@ -757,11 +811,8 @@ function growth.new(ops)
         if result.status == "succeeded" then return compose_route(act, result.route) end
         if result.status == "cancelled" then return finish_zero(act, error_result("cancelled", "search cancelled"), "cancelled") end
         local err = result.error or error_result("bounded_no_route", "planner did not produce a route")
-        if err.code == "expansion_budget" then
-            record_attempt(act, err.code, err)
-            return finish_zero(act, error_result("expansion_budget", "the cycle used its shared budget of " .. MAX_EXPANSIONS
-                .. " search expansions", {limit = MAX_EXPANSIONS, observed = act.agg.expansions}))
-        end
+        -- An exhausted per-attempt allowance fails this attempt only; the
+        -- next attempt (and the reserved fallback) still has its share.
         attempt_failed(act, err)
     end
 
@@ -786,7 +837,7 @@ function growth.new(ops)
             act.terrain = wrapped
             set_stage(act, "resolving")
             local start = act.patch.endpoint
-            local goal_x, goal_z = start.x + act.road.preferred.x * act.length, start.z + act.road.preferred.z * act.length
+            local goal_x, goal_z = act.attempt.target.x, act.attempt.target.z
             local ok, col = pcall(wrapped.get_column, goal_x, goal_z)
             if not ok or type(col) ~= "table" or col.status ~= "ok" or not integer(col.ground_y) then
                 return attempt_failed(act, error_result("invalid_endpoint", "the forward target is not known natural ground",
@@ -797,13 +848,8 @@ function growth.new(ops)
                 provenance = {start = {origin = "growth_seam", requested = {x = start.x, y = start.y + 0.5, z = start.z},
                         ground = copy(start), resolved = copy(start)},
                     goal = {requested = {x = goal.x, y = goal.y + 0.5, z = goal.z}, ground = copy(goal), resolved = copy(goal)}}}
-            local remaining = MAX_EXPANSIONS - act.agg.expansions
-            if remaining < 1 then
-                return finish_zero(act, error_result("expansion_budget", "the cycle used its shared budget of "
-                    .. MAX_EXPANSIONS .. " search expansions", {limit = MAX_EXPANSIONS, observed = act.agg.expansions}))
-            end
             local planner_config = {weights = act.config.planner.weights, road_material = act.config.planner.road_material,
-                max_expansions = remaining, seam_access = access, seam_has_timer = ops.has_timer}
+                max_expansions = act.allowance, seam_access = access, seam_has_timer = ops.has_timer}
             local made, search, serr = pcall(ops.new_planner, wrapped, request, planner_config)
             if not made then serr = error_result("invalid_config", "planner creation failed: " .. tostring(search)); search = nil end
             if not search then return attempt_failed(act, serr or error_result("invalid_config", "planner could not start")) end
@@ -831,28 +877,105 @@ function growth.new(ops)
         resolve_and_search(act, result.terrain)
     end
 
+    -- Recheck a snapshot destination through its attachment provider. Every
+    -- destination candidate comes from an installed provider, so both modes
+    -- need `attachments[kind].resolve`; the result must carry a callable
+    -- `recheck` (run again after the durability wait) and, for a final
+    -- attachment, a callable `verify` too. All of this is checked before any
+    -- survey, so an unusable attachment falls back with zero writes.
+    local function resolve_destination(act, a)
+        local d = a.descriptor
+        local att = ops.attachments and ops.attachments[d.kind] or nil
+        if type(att) ~= "table" or type(att.resolve) ~= "function" then
+            return nil, error_result("attachment_unsupported", "no " .. (a.mode == "final" and "final-attachment" or "revision-checking")
+                .. " provider supports " .. d.kind .. " destinations; this version cannot " .. (a.mode == "final" and "attach to "
+                or "steer toward ") .. tostring(d.approach_id))
+        end
+        local called, resolved, why = pcall(att.resolve, att, copy(d), {mode = a.mode, endpoint = copy(act.patch.endpoint),
+            preferred = copy(act.road.preferred), road_id = act.road_id})
+        if not called then
+            return nil, error_result("attachment_failed", "the attachment provider raised an error: " .. tostring(resolved))
+        end
+        if type(resolved) ~= "table" then
+            return nil, error_result(type(why) == "table" and why.code or "attachment_rejected",
+                type(why) == "table" and why.reason or "the destination attachment was rejected")
+        end
+        if type(resolved.recheck) ~= "function" or (a.mode == "final" and type(resolved.verify) ~= "function") then
+            return nil, error_result("attachment_invalid", "the " .. a.mode .. " attachment for " .. tostring(d.approach_id)
+                .. " lacks a callable " .. (type(resolved.recheck) ~= "function" and "recheck" or "verify"))
+        end
+        if resolved.revision ~= d.revision then
+            return nil, error_result("stale_destination", "destination " .. tostring(d.approach_id) .. " changed from revision "
+                .. tostring(d.revision) .. " to " .. tostring(resolved.revision))
+        end
+        if a.mode == "final" then
+            local g = resolved.goal
+            if type(g) ~= "table" or not integer(g.x) or not integer(g.z) then
+                return nil, error_result("attachment_rejected", "the attachment has no valid goal")
+            end
+            a.target = {x = g.x, z = g.z}
+            local claims = {}
+            for _, claim in ipairs(resolved.claims or {}) do
+                if #claims >= MAX_CLAIMS_PER_CYCLE or type(claim) ~= "table" or type(claim.id) ~= "string" or claim.id == ""
+                    or #claim.id > 256 or type(claim.kind) ~= "string" then
+                    return nil, error_result("attachment_rejected", "the attachment claims are invalid")
+                end
+                claims[#claims + 1] = {id = claim.id, kind = claim.kind, side = claim.side or "destination"}
+            end
+            for _, claim in ipairs(claims) do act.claims[#act.claims + 1] = claim end
+        end
+        act.attachment = resolved
+        return true
+    end
+
+    -- Expansion allowance of the attempt about to run. Destination attempts
+    -- never touch the reserved fallback share; fallback attempts split what
+    -- remains (including unused destination allowance), the last taking all.
+    local function allowance_for(act, a)
+        local remaining = MAX_EXPANSIONS - act.agg.expansions
+        if a.kind == "destination" then
+            return math.min(DEST_EXPANSIONS, remaining - RESERVED_EXPANSIONS)
+        end
+        local left = 0
+        for i = act.index, #act.list do if act.list[i].kind == "fallback" then left = left + 1 end end
+        return math.floor(remaining / math.max(1, left))
+    end
+
     next_attempt = function(act)
         act.index = act.index + 1
         act.attempt_chunks, act.attempt_expansions = 0, 0
-        act.length = TARGET_LENGTHS[act.index]
-        if not act.length then return all_failed(act) end
-        if act.agg.expansions >= MAX_EXPANSIONS then
-            return finish_zero(act, error_result("expansion_budget", "the cycle used its shared budget of "
-                .. MAX_EXPANSIONS .. " search expansions", {limit = MAX_EXPANSIONS, observed = act.agg.expansions}))
+        act.attachment = nil
+        act.claims = copy(act.base_claims)
+        local a = act.list[act.index]
+        act.attempt = a
+        if not a then return all_failed(act) end
+        local allowance = allowance_for(act, a)
+        if allowance < 1 then
+            local err = error_result("expansion_budget", "the cycle used its shared budget of " .. MAX_EXPANSIONS
+                .. " search expansions", {limit = MAX_EXPANSIONS, observed = act.agg.expansions})
+            if a.kind == "destination" then return attempt_failed(act, err) end
+            return finish_zero(act, err)
+        end
+        act.allowance = allowance
+        if a.kind == "destination" then
+            local ok, rerr = resolve_destination(act, a)
+            if not ok then return attempt_failed(act, rerr) end
         end
         local start = act.patch.endpoint
         local first = {x = start.x, y = start.y, z = start.z}
-        local second = {x = start.x + act.road.preferred.x * act.length, y = start.y, z = start.z + act.road.preferred.z * act.length}
+        local second = {x = a.target.x, y = start.y, z = a.target.z}
         local plan, why = ops.survey.plan(first, second, act.config.world)
         if not plan then return attempt_failed(act, why or error_result("survey_failed", "survey preflight failed")) end
+        local cap = a.kind == "destination" and DEST_CHUNKS or MAX_CHUNKS
         local fresh, union = {}, act.agg.chunks
         for _, c in ipairs(plan.chunks) do
             local id = c.ix .. ":" .. c.iy .. ":" .. c.iz
             if not act.chunks[id] then fresh[#fresh + 1] = id; union = union + 1 end
         end
-        if union > MAX_CHUNKS then
+        if union > cap then
             return attempt_failed(act, error_result("survey_budget", "this target would raise the cycle to " .. union
-                .. " distinct mapchunks (limit " .. MAX_CHUNKS .. ")", {limit = MAX_CHUNKS, observed = union}))
+                .. " distinct mapchunks (" .. (a.kind == "destination" and ("destination limit " .. DEST_CHUNKS
+                    .. "; the rest is reserved for fallback") or ("limit " .. MAX_CHUNKS)) .. ")", {limit = cap, observed = union}))
         end
         -- Complete obstacle coverage before anything is surveyed or generated.
         local b = plan.chunk_bounds or plan.requested_bounds
@@ -872,6 +995,40 @@ function growth.new(ops)
         if not service then return attempt_failed(act, err or error_result("survey_failed", "terrain survey could not start")) end
         act.survey = service
         later(act, function() poll_survey(act) end, 0.1)
+    end
+
+    -- Snapshot of the known destinations, taken before any survey. A provider
+    -- that is installed but unhealthy fails the cycle closed.
+    local function unavailable(d)
+        local claim, cerr = hooks.claim(d.id, d.approach_id)
+        if cerr then return "claim_lookup_failed" end
+        if claim then return "claimed" end
+        if ops.destination_unavailable then
+            local ok, why = pcall(ops.destination_unavailable, copy(d))
+            if not ok then return "unavailable" end
+            if why ~= nil and why ~= false then return type(why) == "string" and why or "unavailable" end
+        end
+        return nil
+    end
+    local function select_destinations(road_id, road)
+        local selection, serr = policy.select({road = {road_id = road_id, endpoint = copy(road.endpoint),
+            preferred = copy(road.preferred), source = copy(road.source)}, providers = ops.providers or {},
+            unavailable = unavailable})
+        if not selection then return nil, serr end
+        local list, candidates = {}, {}
+        for _, c in ipairs(selection.candidates) do
+            local d = c.descriptor
+            list[#list + 1] = {kind = "destination", mode = c.mode, descriptor = copy(d), approach_id = d.approach_id,
+                target = copy(c.target), length = math.floor(c.distance + 0.5)}
+            candidates[#candidates + 1] = {kind = d.kind, id = d.id, approach_id = d.approach_id, mode = c.mode,
+                distance = math.floor(c.distance + 0.5), result = c.outcome}
+        end
+        for _, f in ipairs(selection.fallback) do
+            list[#list + 1] = {kind = "fallback", length = f.length, target = copy(f.target)}
+        end
+        local rejected = {}
+        for i = 1, math.min(#selection.rejected, MAX_REJECTED) do rejected[i] = copy(selection.rejected[i]) end
+        return list, selection.scan, candidates, rejected, #selection.rejected
     end
 
     local EXTENDABLE = {
@@ -911,7 +1068,8 @@ function growth.new(ops)
         if not good then return nil, serr end
         local config, cerr = ops.world_config()
         if not config then return nil, cerr or error_result("unsupported_world", "world configuration is unavailable") end
-        local act = {token = 0, index = 0, stage = "planning", chunks = {}, outcomes = {}, log = {}, claims = claims,
+        local act = {token = 0, index = 0, stage = "planning", chunks = {}, outcomes = {}, log = {}, claims = copy(claims),
+            base_claims = claims,
             agg = {chunks = 0, chunk_requests = 0, expansions = 0}, road_id = road_id, road = road, patch = patch,
             start_owner = last.owner, config = config, actor = actor, from_revision = road.revision,
             origin_op_id = road.origin_op_id}
@@ -920,6 +1078,12 @@ function growth.new(ops)
             status = function() return {road_id = road_id, stage = act.stage, segment_id = act.segment_id} end})
         if not slot then return nil, busy end
         act.slot = slot
+        -- Snapshot destinations before anything is surveyed; discoveries made
+        -- later are considered next cycle.
+        local list, scan, candidates, rejected, rejected_total = select_destinations(road_id, road)
+        if not list then jobs:release(slot); return nil, scan end
+        act.list, act.scan, act.candidates, act.rejected = list, scan, candidates, rejected
+        act.scan.rejected_total = rejected_total
         -- Intent: allocate the identity and consume the activation before any survey.
         local sequence
         local intended, ierr = store:update(function(d)
