@@ -518,3 +518,42 @@ reservation and approach reset. Implementation tickets own the tests and engine
 evidence above. Product defaults (radii, scan cone, supported initial
 junction subset and finite world cap) are explicit here so review can change
 them before implementation; none requires a speculative global planner.
+
+## Slice B implementation notes (#47)
+
+Implemented in `src/growth_store.lua` (registry, segment records, claims, index)
+and `src/growth.lua` (seed hooks, adoption, one directional cycle, status,
+cancel, retry, retire, inspect). Interpretations of the design above:
+
+- Pending intent lives on each road record (`road.pending`), not in one
+  registry-wide field, so several uncertain roads can coexist after a restart.
+  Road states are `open|planning|building|stopped|uncertain|retired|connected`;
+  `stopped` always means known zero writes and is the only retryable state.
+- A seed is segment 1 of its road (`growth:v1:<op>:s1`); unadopted seeds count
+  against the 128-road cap and all seeds/segments against the 1,024 cap. A seed
+  whose outward operation provably wrote nothing is released; every other seed
+  stays reserved. Recovery voids seeds only for operations that are
+  `failed|cancelled|interrupted` with `writes=none`.
+- Seed creation failure (derivation, 512-node patch cap, storage) does not fail
+  the outward road: the operation records `growth.state=unseeded` with the
+  reason and is simply not adoptable. A seed whose readback fails stays
+  `intended` (`growth.state=unverified`). Legacy operations have no `growth`
+  field and report `legacy_unadoptable`.
+- `growth.hooks.claim(settlement_id, exit_id)` reads claim id
+  `exit:<settlement_id>/<exit_id>`. The outward service checks it at admission,
+  in `eligibility` (state `claimed`) and twice before building (after the
+  composed plan and again after the durability wait). An unreadable or
+  newer-schema registry makes the lookup fail closed (`growth_unavailable`).
+- The builder's generic `build_failed` callback, `partial_build` and unknown
+  codes keep the segment uncertain; only `stale_plan`, `seam_changed`,
+  `towns_busy`, `towns_conflict` and `write_budget` prove zero writes. A refusal
+  to start the builder is zero writes.
+- `extend(road_id, actor, {claims=...})` accepts claims for destination slices;
+  no command exposes them yet. This slice only plans the 96- then 64-node
+  directional target; destination ranking and attachments belong to later slices.
+- Obstacle masking uses stored raster geometry and fails closed on index
+  disagreement (`road_index_corrupt`) or an incomplete query (`road_index_budget`).
+  The exempt columns are only the authenticated start-seam surfaces.
+- Not yet verified in an engine: storage durability ordering (#38), Towns
+  integration through the real adapter, restart in a real world, and player
+  traversal. `tools/growth_trial` states what its headless phases cover.

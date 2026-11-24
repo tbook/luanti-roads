@@ -20,6 +20,8 @@ local seam=load("src/seam.lua")
 local towns_adapter=load("src/towns_adapter.lua")
 local outward_store=load("src/outward_store.lua")
 local outward=load("src/outward.lua")
+local growth_store=load("src/growth_store.lua")
+local growth=load("src/growth.lua")
 local outward_policy=load("src/outward_policy.lua")
 
 assert(edges.set_raster(raster))
@@ -61,7 +63,8 @@ local ops={now=now,after=function(delay,fn) core.after(delay,fn) end,
     end,
     new_planner=function(terrain,request,config)
         local planner_config={weights=config.weights,road_material=config.road_material,
-            max_expansions=config.max_expansions}
+            max_expansions=config.max_expansions,seam_access=config.seam_access,
+            seam_has_timer=config.seam_has_timer}
         return planner.new(terrain,request,planner_config)
     end,
     compose=function(terrain,route,config) return plans.compose(terrain,route,config) end,
@@ -96,7 +99,23 @@ do
         serialize=core.serialize,
         deserialize=function(text) return core.deserialize(text,true) end,
         now=os.time})
-    local outward_ops={jobs=controller,towns=towns,store=store,now=now,after=ops.after,
+    -- Growth lifecycle (slice B). No commands or scheduler use it yet; the
+    -- outward service records growth seeds and consults incoming claims.
+    local growth_storage={get=function(key) local v=mod_storage:get_string(key); if v=="" then return nil end return v end,
+        set=function(key,value) mod_storage:set_string(key,value) end}
+    local growth_db=growth_store.new({storage=growth_storage,serialize=core.serialize,
+        deserialize=function(text) return core.deserialize(text,true) end,now=os.time})
+    local outward_service
+    local growth_service,growth_error=growth.new({store=growth_db,jobs=controller,now=now,after=ops.after,
+        raster=raster,seam=seam,access=access,has_timer=function(pos) return core.get_node_timer(pos):is_started() end,
+        classify=surface.classify,load_area=function(minp,maxp) return core.load_area(minp,maxp) end,
+        world_config=world_config,survey=survey,start_survey=ops.start_survey,new_planner=ops.new_planner,
+        compose=ops.compose,start_build=ops.start_build,towns=towns,wrap_terrain=towns_adapter.wrap_terrain,
+        save_interval=function() return tonumber(core.settings:get("server_map_save_interval")) or 5.3 end,
+        find_operation=function(op_id) return outward_service and outward_service:operation(op_id) or nil end,
+        log=function(level,message) core.log(level,message) end})
+    if not growth_service then error("[roads] cannot initialize growth service: "..tostring(growth_error.reason)) end
+    local outward_ops={jobs=controller,growth=growth_service.hooks,towns=towns,store=store,now=now,after=ops.after,
         world_config=world_config,survey=survey,start_survey=ops.start_survey,
         exit_endpoints=ops.exit_endpoints,new_planner=ops.new_planner,compose=ops.compose,
         start_build=ops.start_build,wrap_terrain=towns_adapter.wrap_terrain,
@@ -112,8 +131,10 @@ do
         end}
     local service,service_error=outward.new(outward_ops)
     if not service then error("[roads] cannot initialize outward service: "..tostring(service_error.reason)) end
+    outward_service=service
     service:recover()
-    rawset(_G,"roads",{outward=service})
+    growth_service:recover()
+    rawset(_G,"roads",{outward=service,growth=growth_service})
     outward_deps={service=service,towns=towns,policy=outward_policy,
         seed=function() return core.get_mapgen_setting("seed") end}
 end

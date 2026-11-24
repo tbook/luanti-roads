@@ -14,7 +14,8 @@ world = Path(tempfile.mkdtemp(prefix='roads-growth-trial-'))
 trial = world / 'worldmods' / 'roads_trial'
 trial.mkdir(parents=True)
 (world / 'worldmods' / 'roads').symlink_to(root, target_is_directory=True)
-(trial / 'init.lua').write_bytes((Path(__file__).parent / 'init.lua').read_bytes())
+for name in ('init.lua', 'service.lua'):
+    (trial / name).write_bytes((Path(__file__).parent / name).read_bytes())
 shutil.copytree(root / 'src', trial / 'src')
 (trial / 'mod.conf').write_text('name = roads_trial\ndepends = roads\n')
 (world / 'world.mt').write_text('gameid = mineclone2\nbackend = sqlite3\nplayer_backend = sqlite3\n'
