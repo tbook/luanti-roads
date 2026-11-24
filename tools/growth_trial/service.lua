@@ -4,6 +4,11 @@
 -- storage are the real engine's. The growth steps go through the registered
 -- /roads_grow definition.
 --
+-- Cycles 1 and 2 run with fake destination providers (destination steering and
+-- fallback; the trajectory is the same straight 96-node cycle): a distant town
+-- gives a waypoint (partial_progress), a reachable one has no attachment provider
+-- so it is rejected as unsupported and the real directional fallback builds.
+--
 -- Phase 1 (fresh world): pre-fill a flat stone area with obstacle walls
 -- (layout.lua), build a fresh outward road that records a growth seed, adopt it,
 -- walk three consecutive continuation cycles that each bend round a wall, edit the
@@ -24,6 +29,7 @@ edges.set_raster(raster); planner.set_edges(edges); plans.set_dependencies(raste
 planner.set_seam_dependencies(seam, raster); plans.set_seam_dependency(seam); builder.set_seam_dependencies(seam, raster)
 local outward, outward_store, growth, growth_store = load('outward'), load('outward_store'), load('growth'), load('growth_store')
 local commands = load('commands')
+local growth_policy = load('growth_policy')
 local access = surface.engine_access(core)
 local SID, EXIT = 'trial:0:0', '+x:200:0'
 local COBBLE, DIRT = 'mcl_core:cobble', 'mcl_core:dirt'
@@ -151,7 +157,13 @@ local function services(trap, counters)
     local ostore = outward_store.new({storage = storage, serialize = core.serialize, deserialize = deserialize, now = os.time})
     local interval = function() return tonumber(core.settings:get('server_map_save_interval')) or 5.3 end
     local outward_service
-    local service = check(growth.new({store = gstore, jobs = slot_jobs, now = now, after = core.after, raster = raster, seam = seam,
+    local providers = {}   -- fake destination providers
+    -- Fake attachment provider: waypoints are revision-checkable; final attachments are unsupported.
+    local attachments = {town = {resolve = function(_, d, ctx)
+        if ctx.mode == 'final' then return nil, {code = 'unsupported_attachment', reason = 'the trial has no final attachment'} end
+        return {revision = d.revision, recheck = function() return true end}
+    end}}
+    local service = check(growth.new({policy = growth_policy, providers = providers, attachments = attachments, store = gstore, jobs = slot_jobs, now = now, after = core.after, raster = raster, seam = seam,
         access = access, has_timer = timer, classify = surface.classify, load_area = core.load_area,
         world_config = function() return config end, survey = survey, start_survey = start_survey, new_planner = new_planner,
         compose = compose, start_build = start_build, save_interval = interval,
@@ -179,7 +191,7 @@ local function services(trap, counters)
         assert(ok, msg)
         return msg
     end
-    return {service = service, outward = outward_service, gstore = gstore, slot_jobs = slot_jobs, try = try, grow = grow}
+    return {service = service, outward = outward_service, gstore = gstore, providers = providers, slot_jobs = slot_jobs, try = try, grow = grow}
 end
 
 -- Polls predicate every half second (80 s limit), then calls then_do. Both run guarded.
@@ -231,9 +243,32 @@ local function phase_one_body(done, mod_storage)
         local walk
         walk = function(cycle)
             if cycle > 3 then return s.finish_walk() end
+            local x = ORIGIN_X + CYCLE * (cycle - 1)
+            s.providers.town = nil
+            if cycle <= 2 then
+                -- cycle 1: 400 nodes ahead (waypoint); cycle 2: 160 nodes ahead (final range)
+                local ahead = cycle == 1 and 400 or 160
+                s.providers.town = {nearby = function()
+                    return {truncation = 'none', items = {{version = 1, kind = 'town', id = 'trial-town', approach_id = 'trial-town/east',
+                        position = {x = x + ahead, y = 0, z = 0}, direction = {x = -1, z = 0}, revision = 1}}}
+                end}
+            end
             assert(grow('extend ' .. road_id):find('Growth cycle ' .. road_id .. ':s' .. (cycle + 1) .. ':r' .. cycle .. ' started', 1, true))
             wait(function() return service.active == nil end, function()
                 local now_status = check(service:status(road_id))
+                local report = grow('status ' .. road_id)
+                if cycle == 1 then
+                    assert(report:find('built (partial_progress)', 1, true) and report:find('waypoint attachment, 400 nodes away', 1, true)
+                        and report:find('destination trial-town/east (waypoint) composed', 1, true), report)
+                    core.log('action', 'GROWTH_TRIAL_STEERING ' .. report)
+                elseif cycle == 2 then
+                    assert(report:find('built (directional)', 1, true)
+                        and report:find('destination trial-town/east (final) unsupported_attachment', 1, true)
+                        and report:find('96 node fallback composed', 1, true), report)
+                    core.log('action', 'GROWTH_TRIAL_FALLBACK ' .. report)
+                else
+                    assert(report:find('scan disabled', 1, true) and report:find('built (directional)', 1, true), report)
+                end
                 assert(now_status.state == 'open' and now_status.revision == cycle + 1
                     and now_status.endpoint.x == ORIGIN_X + CYCLE * cycle, core.serialize(now_status))
                 assert(node_name(now_status.endpoint) == COBBLE)

@@ -594,3 +594,53 @@ refusal, then an interrupted fourth cycle and a second launch that checks the
 restart conversion (`stopped` or `uncertain`) without rewriting the world.
 `tests/growth_trial.lua` dry-runs that logic; the engine run itself is still a
 manual step. The cancel message claims a released slot only when no build began.
+
+## Slice E implementation notes (#50)
+
+Implemented in `src/growth.lua` (cycle orchestration), with presentation in
+`src/commands.lua` and tests in `tests/growth_destination.lua`. Interpretations:
+
+- `growth.new` takes the pure `policy` module and optional `providers`
+  (`town|village|road`, each `nearby(pos, radius, limit)`), `attachments`
+  (by kind) and `destination_unavailable(descriptor)` (busy/uncertain approaches
+  such as outward reservations; growth claims on `exit:<id>/<approach_id>` are
+  always consulted). `init.lua` installs no provider yet (#51), so production
+  cycles report `scan=disabled` and grow directionally.
+- `extend` takes the destination snapshot after the job slot is held and before
+  any survey or durable intent. An unhealthy installed provider fails the cycle
+  closed (`provider_unhealthy`) without consuming the activation.
+- Attempts: the retained candidates (at most two) in policy order, then the 96-
+  and 64-node fallback targets, each a full survey/search/compose attempt. The first
+  attempt that composes is the only one committed; a cycle builds at most one
+  segment.
+- Chunks: one union across attempts. A destination attempt that would raise the
+  union above 64 is refused with `survey_budget` before survey; fallback may reach
+  96 and reuses counted chunks.
+- Expansions: a destination attempt gets `min(50,000, remaining - 50,000)`. Each
+  fallback attempt gets `floor(remaining / fallback attempts left)`, so unused
+  destination allowance passes to fallback and the last attempt takes the rest.
+  An exhausted allowance fails only its attempt.
+- Attachment provider contract (fake only; #51 builds on it). Every destination
+  candidate, waypoint or final, requires `ops.attachments[kind]` with a callable
+  `resolve(self, descriptor, {mode="final"|"waypoint", endpoint, preferred, road_id})`
+  returning `{revision, recheck(self, descriptor) -> true | nil, err}` plus, for
+  `mode="final"` only, `goal={x,z}`, optional `claims` and
+  `verify(self, {plan, endpoint}) -> true | nil, err`; or `nil, {code, reason}`.
+  All of this is checked before any survey. A missing resolver is
+  `attachment_unsupported`, a result without a callable `recheck` (or, for final,
+  `verify`) is `attachment_invalid`, a revision different from the snapshot is
+  `stale_destination`; each rejection falls back with zero writes. Waypoints are
+  therefore not trusted unchecked: they need a revision-checkable provider
+  contract. `recheck` runs again after the durability wait (zero writes on
+  failure). `connected` requires `verify` after construction; a failed
+  verification leaves the road `uncertain` (`attachment_unverified`) and keeps
+  the claims. Waypoint and directional results are `partial_progress` and
+  `directional`. With no providers installed nothing is scanned (`scan
+  disabled`) and behavior is unchanged.
+- Accepted deviation: a claim conflict at reservation or a lost claim in the
+  synchronous preflight stops the cycle with zero writes and does not fall back.
+  Likewise an obstacle-collection failure (`store:collect`, e.g.
+  `road_index_budget`) ends the cycle at once: the index is shared by every
+  target, so fallback would hit the same failure.
+- A blocked cycle's stop carries `attempted` (kind, length, approach, outcome per
+  attempt) next to the last concrete error.

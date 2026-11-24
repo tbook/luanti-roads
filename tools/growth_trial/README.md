@@ -36,6 +36,14 @@ fourth cycle that is cut off:
 - `--interrupt build`: the real builder writes the segment, its completion is
   swallowed, and the server shuts down before the result is saved.
 
+Destination steering and fallback use fake providers only (no Towns, no
+attachment provider): cycle 1 sees a town 400 nodes ahead, so the cycle builds a
+waypoint segment and reports `built (partial_progress)` (`GROWTH_TRIAL_STEERING`);
+cycle 2 sees a town 160 nodes ahead whose final attachment the fake provider rejects as unsupported, so it
+is rejected explicitly and the real 96-node fallback builds
+(`GROWTH_TRIAL_FALLBACK`); cycle 3 has no provider (`scan disabled`). The three
+trajectories are identical, so the rest of the trial is unchanged.
+
 Phase 2 (`roads_trial_phase = 2`) restarts and checks the persisted registry:
 planning interruption must read `stopped` (code `interrupted`, no pending
 segment, endpoint node ahead untouched); build interruption must read
