@@ -557,3 +557,40 @@ cancel, retry, retire, inspect). Interpretations of the design above:
 - Not yet verified in an engine: storage durability ordering (#38), Towns
   integration through the real adapter, restart in a real world, and player
   traversal. `tools/growth_trial` states what its headless phases cover.
+
+## Slice C implementation notes (#48)
+
+Implemented as `/roads_grow` in `src/commands.lua`, registered only when the
+growth service is passed to `commands.register` (`init.lua` does this). Every
+action is server-privileged and maps one-to-one onto the service methods.
+Interpretations of the design above:
+
+- Arguments are checked before the service runs: an unknown or missing action,
+  a wrong argument count, or a road id without the `growth:v1:` prefix returns
+  `invalid_request` and writes nothing. Service errors keep their codes.
+- `adopt` reports the road and its state. Repeating it is idempotent and says so;
+  the service decides whether anything changes.
+- `extend` and `retry` return the cycle id (`<road-id>:s<seq>:r<revision>`) and
+  do not wait for the cycle. `status` shows the live stage while it runs.
+- The status text carries the local and preferred headings, the endpoint and
+  revision, the current or last segment, the attempts (latest four), the
+  per-cycle limits, the stop reason (`Blocked:` when stopped), the explanation
+  for uncertain or retired work, and a note that destinations are not scanned.
+- The design lists a seam status in the summary. The service summary does not
+  carry one, because checking it reads the world. Adopt, extend and retry report
+  `seam_changed` when they check it, and `inspect` reports the comparison with
+  the world. `status` only points to `inspect`. A senior may want the service to
+  record the last seam verification durably.
+- "Preview" is the textual current cycle or last segment. No particle preview was
+  added.
+- `inspect` shows at most four mismatched nodes and the segment states by count.
+
+Tests: `tests/growth_command.lua` drives the registered definition over the real
+growth and outward services (`tests/growth_fixture.lua`, extracted from
+`tests/growth.lua` without changes to its assertions). The engine trial phase
+in `tools/growth_trial/service.lua` uses the same command path. It is a two-launch
+trial (see its README): three consecutive bends round obstacle walls, a seam-edit
+refusal, then an interrupted fourth cycle and a second launch that checks the
+restart conversion (`stopped` or `uncertain`) without rewriting the world.
+`tests/growth_trial.lua` dry-runs that logic; the engine run itself is still a
+manual step. The cancel message claims a released slot only when no build began.

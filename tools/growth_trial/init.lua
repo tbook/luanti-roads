@@ -1,4 +1,7 @@
 local root=core.get_modpath('roads_trial')
+-- Phase 1 builds a fresh world; phase 2 is a second launch of that world and rewrites nothing.
+local phase=tonumber(core.settings:get('roads_trial_phase')) or 1
+local mod_storage=core.get_mod_storage() -- only available while mods load
 local function load(n) return dofile(root..'/src/'..n..'.lua') end
 local surface,raster,edges,planner,plans,builder,seam=load('surface'),load('raster'),load('edges'),load('planner'),load('plans'),load('build'),load('seam')
 edges.set_raster(raster); planner.set_edges(edges); plans.set_dependencies(raster,edges)
@@ -56,13 +59,22 @@ local function trial()
    local rejected,err=planner.new(fresh,req,config)
    assert(not rejected and err.code=='seam_changed')
    core.log('action','GROWTH_TRIAL_SEAM '..core.serialize({writes=metrics.writes,preserved=#patch.preserved}))
-   dofile(core.get_modpath('roads_trial')..'/service.lua')(function()
-    core.log('action','GROWTH_TRIAL_PASS')
-    core.request_shutdown('growth trial complete',false,0)
-   end)
+   dofile(root..'/service.lua')(1,function()
+    core.log('action','GROWTH_TRIAL_PHASE1_PASS')
+    core.request_shutdown('growth trial phase 1 complete',false,0)
+   end,mod_storage)
   end)
  end)
 end
-core.after(0,function() core.emerge_area({x=-16,y=-32,z=-16},{x=63,y=31,z=31},function(_,_,left)
- if left==0 then core.after(0,function() safe(trial) end) end
-end) end)
+if phase==2 then
+ core.after(0,function() safe(function()
+  dofile(root..'/service.lua')(2,function()
+   core.log('action','GROWTH_TRIAL_PASS')
+   core.request_shutdown('growth trial complete',false,0)
+  end,mod_storage)
+ end) end)
+else
+ core.after(0,function() core.emerge_area({x=-16,y=-32,z=-16},{x=63,y=31,z=31},function(_,_,left)
+  if left==0 then core.after(0,function() safe(trial) end) end
+ end) end)
+end

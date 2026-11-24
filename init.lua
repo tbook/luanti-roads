@@ -89,6 +89,7 @@ if not preview_renderer then error("[roads] cannot initialize route preview: "..
 -- reports towns_unavailable and manual commands are unaffected. The
 -- /roads_outward command is registered after the service exists.
 local outward_deps=nil
+local growth_deps=nil
 do
     local mod_storage=core.get_mod_storage()
     local towns=towns_adapter.new(function() return rawget(_G,"towns_api") end,now)
@@ -137,8 +138,9 @@ do
     rawset(_G,"roads",{outward=service,growth=growth_service})
     outward_deps={service=service,towns=towns,policy=outward_policy,
         seed=function() return core.get_mapgen_setting("seed") end}
+    growth_deps={service=growth_service}
 end
-assert(commands.register(core,controller,surface,world_config,preview_renderer,outward_deps))
+assert(commands.register(core,controller,surface,world_config,preview_renderer,outward_deps,growth_deps))
 core.register_on_leaveplayer(function(player)
     local name=player:get_player_name()
     controller:disconnect(name)
