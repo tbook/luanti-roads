@@ -42,6 +42,11 @@ per plan. These initial limits are tuning points, not latency guarantees; larger
 plans must be shortened. Construction changes terrain and has no automatic
 rollback; use a disposable world while playtesting.
 
+Server-privileged `/roads_grow` manages growth from a built outward road:
+`adopt <outward-op-id>` records it for growth, and `extend`, `status`, `cancel`,
+`retry`, `retire` or `inspect <road-id>` act on the growth road. Extending or
+retrying may generate terrain and builds one segment; growth is never automatic.
+
 ## Development
 
 `mod.conf` declares the mod and dependencies; `init.lua` wires the Luanti

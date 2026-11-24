@@ -185,9 +185,91 @@ function commands.outward_summary(s)
     return table.concat(lines," ")
 end
 
+-- Growth command family (/roads_grow). Its text is bounded: the service keeps
+-- only the latest attempts and every list shown here is capped.
+local GROW_PREFIX="growth:v1:"
+local GROW_ACTIONS={adopt=true,extend=true,status=true,cancel=true,retry=true,retire=true,inspect=true}
+local GROW_USAGE="Usage: /roads_grow adopt <outward-op-id> | extend|status|cancel|retry|retire|inspect <road-id>."
+local GROW_ITEMS=4
+
+-- Presentation of a growth-service summary (see src/growth.lua status).
+function commands.growth_summary(s)
+    if type(s)~="table" then return "No growth road is recorded for this identifier." end
+    local hv=HEADING_VECTORS[(tonumber(s.local_heading) or 0)+1] or {0,0}
+    local pv=s.preferred or {}
+    local src=s.source or {}
+    local segments=tonumber(s.segments) or 0
+    local lines={string.format("Growth road %s: %s, revision %s, endpoint %s, %d %s.",
+        tostring(s.road_id),tostring(s.state),tostring(s.revision),fmt_point(s.endpoint),segments,segments==1 and "segment" or "segments")}
+    lines[#lines+1]=string.format("Local heading %s toward (%d, %d); preferred outward (%d, %d) from settlement %s exit %s, outward operation %s.",
+        tostring(s.local_heading),hv[1],hv[2],pv.x or 0,pv.z or 0,tostring(src.settlement_id),tostring(src.exit_id),tostring(s.origin_op_id))
+    if s.active then
+        lines[#lines+1]="Current cycle: stage "..tostring(s.stage)..(s.pending and (", segment "..tostring(s.pending.segment_id)) or "").."."
+    elseif s.pending then
+        lines[#lines+1]="Unfinished segment "..tostring(s.pending.segment_id)..": "..tostring(s.pending.state)..", writes "..tostring(s.pending.writes).."."
+    elseif s.last_segment_id then
+        lines[#lines+1]="Last segment "..tostring(s.last_segment_id).."."
+    end
+    lines[#lines+1]="Destinations: none are scanned yet; growth targets the preferred direction only."
+    local attempts=type(s.attempts)=="table" and s.attempts or {}
+    for i=math.max(1,#attempts-GROW_ITEMS+1),#attempts do
+        local a=attempts[i]
+        local targets={}
+        for _,t in ipairs(type(a.targets)=="table" and a.targets or {}) do
+            targets[#targets+1]=tostring(t.length).." nodes "..tostring(t.outcome)..(t.reason and (" - "..tostring(t.reason)) or "")
+        end
+        lines[#lines+1]=string.format("Attempt on %s from revision %s: %s%s; %d chunks, %d expansions.",
+            tostring(a.segment_id),tostring(a.from_revision),tostring(a.outcome),
+            #targets>0 and ("; "..table.concat(targets,"; ")) or "",a.chunks or 0,a.expansions or 0)
+    end
+    local b=type(s.budgets)=="table" and s.budgets or {}
+    lines[#lines+1]=string.format("Limits per cycle: %s chunks, %s expansions%s.",tostring(b.chunks),tostring(b.expansions),
+        s.active and string.format(" (used %d chunks, %d expansions)",b.used_chunks or 0,b.used_expansions or 0) or "")
+    if s.stop then lines[#lines+1]=(s.state=="stopped" and "Blocked: " or "Stop: ")..failure(s.stop) end
+    if s.retired then lines[#lines+1]=string.format("Retired by %s; was %s.",tostring(s.retired.by),tostring(s.retired.was)) end
+    if s.explanation then lines[#lines+1]=s.explanation end
+    lines[#lines+1]="Seam: not compared here; /roads_grow inspect compares the intended seam with the world. Adopt, extend and retry refuse an edited seam."
+    return table.concat(lines," ")
+end
+
+-- Presentation of a growth inspect report: the summary plus the world comparison.
+function commands.growth_inspect(r)
+    if type(r)~="table" then return "No growth report is available." end
+    local lines={commands.growth_summary(r)}
+    local w=type(r.world)=="table" and r.world or {}
+    if w.status=="unknown" then
+        lines[#lines+1]="World: unknown"..(w.reason and (" ("..tostring(w.reason)..")") or "").."."
+    else
+        lines[#lines+1]="World: "..tostring(w.status).." against the "..tostring(w.intended)..(w.segment_id and (" of "..tostring(w.segment_id)) or "").."."
+        local c=w.comparison
+        if type(c)=="table" then
+            lines[#lines+1]=string.format("Checked %d preserved nodes: %d differ or are unreadable%s.",
+                c.checked or 0,c.mismatched or 0,c.loaded and "" or "; the seam mapblocks were not loaded")
+            local samples=type(c.samples)=="table" and c.samples or {}
+            for i=1,math.min(#samples,GROW_ITEMS) do
+                local x=samples[i]
+                lines[#lines+1]="Node "..fmt_point(x).." expected "..tostring(x.expected)..": "..tostring(x.reason).."."
+            end
+        end
+    end
+    local counts,order={},{}
+    for _,seg in ipairs(type(r.segments_state)=="table" and r.segments_state or {}) do
+        local state=tostring(seg.state)
+        if not counts[state] then counts[state]=0; order[#order+1]=state end
+        counts[state]=counts[state]+1
+    end
+    table.sort(order)
+    local parts={}
+    for _,state in ipairs(order) do parts[#parts+1]=counts[state].." "..state end
+    if #parts>0 then lines[#lines+1]="Segments by state: "..table.concat(parts,", ").."." end
+    if r.note then lines[#lines+1]=r.note end
+    return table.concat(lines," ")
+end
+
 -- outward (optional) = {service, towns, policy, seed=function() -> string};
 -- without it /roads_outward is not registered and status/cancel stay manual.
-function commands.register(engine,controller,surface,world_config,preview_renderer,outward)
+-- growth (optional) = {service}; without it /roads_grow is not registered.
+function commands.register(engine,controller,surface,world_config,preview_renderer,outward,growth)
     if type(engine)~="table" or type(engine.register_chatcommand)~="function"
         or type(controller)~="table" or type(surface)~="table"
         or type(surface.player_feet)~="function" or type(world_config)~="function" then
@@ -196,6 +278,9 @@ function commands.register(engine,controller,surface,world_config,preview_render
     if outward~=nil and (type(outward)~="table" or type(outward.service)~="table"
         or type(outward.towns)~="table" or type(outward.policy)~="table" or type(outward.seed)~="function") then
         return nil,"outward command dependencies are incomplete"
+    end
+    if growth~=nil and (type(growth)~="table" or type(growth.service)~="table") then
+        return nil,"growth command dependencies are incomplete"
     end
     -- Settlement each player last requested, so /roads_status can report it after the run ends (memory only).
     local last_outward={}
@@ -276,6 +361,64 @@ function commands.register(engine,controller,surface,world_config,preview_render
             return true,string.format("Outward road %s started: settlement %s, exit %s, %.1f nodes from the requester, targets %s. It may generate terrain and builds one road automatically; use /roads_status to follow it.",
                 tostring(started.op_id),chosen.settlement_id,chosen.exit_id,chosen.settlement_distance,table.concat(targets,", "))
         end)
+    end
+    if growth then
+        -- Arguments are checked here; the service owns every state decision and
+        -- returns its own error codes. Nothing is written for a bad request.
+        local service=growth.service
+        local function with_status(text,road_id)
+            local s,err=service:status(road_id)
+            if not s then return text.." "..failure(err) end
+            return text.." "..commands.growth_summary(s)
+        end
+        engine.register_chatcommand("roads_grow",{params="adopt <outward-op-id> | extend|status|cancel|retry|retire|inspect <road-id>",
+            description="Adopt a built outward road for growth, or extend, inspect, cancel, retry or retire a growth road. Extending or retrying may generate terrain and builds one segment; growth is never automatic.",
+            privs={server=true},
+            func=function(name,param)
+                local words={}
+                for word in tostring(param or ""):gmatch("%S+") do words[#words+1]=word end
+                local action,id=words[1],words[2]
+                if not action then return false,"invalid_request: missing action. "..GROW_USAGE end
+                if not GROW_ACTIONS[action] then return false,"invalid_request: unknown action "..action..". "..GROW_USAGE end
+                if #words~=2 then return false,"invalid_request: "..action.." takes exactly one argument. "..GROW_USAGE end
+                if action=="adopt" then
+                    local road_id,err=service:adopt(id,name)
+                    if not road_id then return false,failure(err) end
+                    return true,with_status("Growth road "..road_id.." is adopted from outward operation "..id..". Adopting it again changes nothing.",road_id)
+                end
+                if id:sub(1,#GROW_PREFIX)~=GROW_PREFIX then
+                    return false,"invalid_request: a growth road id starts with "..GROW_PREFIX..". "..GROW_USAGE
+                end
+                if action=="extend" then
+                    local cycle,err=service:extend(id,name)
+                    if not cycle then return false,failure(err) end
+                    return true,with_status("Growth cycle "..cycle.." started. It may generate terrain and builds at most one segment.",id)
+                elseif action=="status" then
+                    local s,err=service:status(id)
+                    if not s then return false,failure(err) end
+                    return true,commands.growth_summary(s)
+                elseif action=="cancel" then
+                    local ok,err=service:cancel(id,name)
+                    if not ok then return false,failure(err) end
+                    -- A cancel after the builder entered leaves the road uncertain; do not
+                    -- promise anything beyond what the stored state says.
+                    local after=service:status(id)
+                    local tail=after and after.state=="uncertain" and "Writes are unknown and every reservation is kept."
+                        or "No writes were made; the server slot is released."
+                    return true,with_status("Growth cycle for "..id.." cancelled by "..name..". "..tail,id)
+                elseif action=="retry" then
+                    local cycle,err=service:retry(id,name)
+                    if not cycle then return false,failure(err) end
+                    return true,with_status("Retry started as growth cycle "..cycle..". It may generate terrain and builds at most one segment.",id)
+                elseif action=="retire" then
+                    local ok,err=service:retire(id,name)
+                    if not ok then return false,failure(err) end
+                    return true,with_status("Growth road "..id.." is retired; every reservation is kept.",id)
+                end
+                local report,err=service:inspect(id,name)
+                if not report then return false,failure(err) end
+                return true,commands.growth_inspect(report)
+            end})
     end
     register("roads_build","Build your planned road",function(name)
         if not engine.get_player_by_name(name) then return false,"This command requires an online player." end
