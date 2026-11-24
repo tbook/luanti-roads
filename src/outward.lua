@@ -92,6 +92,20 @@ function outward.new(ops)
                 write_count = road.write_count, expectation_count = road.expectation_count} or nil}
     end
 
+    -- Incoming growth claims on a full exit id. Fails closed when the claim
+    -- registry cannot be established.
+    local function claimed(settlement_id, exit_id)
+        if not ops.growth then return nil end
+        local ok, claim, why = pcall(ops.growth.claim, settlement_id, exit_id)
+        if not ok then return nil, error_result("growth_unavailable", "growth claims cannot be read: " .. tostring(claim)) end
+        if why then return nil, error_result("growth_unavailable", "growth claims cannot be established: " .. tostring(why.reason)) end
+        if claim then
+            return nil, error_result("already_reserved", "this exit is claimed by an incoming growth road",
+                {scope = "exit", claim = claim})
+        end
+        return nil
+    end
+
     ------------------------------------------------------------ persistence
     local function save(op, quiet)
         local ok, why = store:save(op.settlement_id, op)
@@ -115,6 +129,25 @@ function outward.new(ops)
         act.survey, act.search, act.builder, act.terrain, act.plan = nil, nil, nil, nil, nil
     end
 
+    -- Growth seed bookkeeping (optional ops.growth hooks). A built road has
+    -- its exact seam read back before the seed is marked verified; a road that
+    -- provably wrote nothing releases its seed; anything else stays reserved.
+    local function settle_seed(op, state, writes)
+        local seed = op.growth
+        if not ops.growth or type(seed) ~= "table" or seed.state ~= "intended" then return end
+        if state == "built" and writes == "all" then
+            local ok, result, why = pcall(ops.growth.verify, seed)
+            if ok and result then op.growth = {seed_id = seed.seed_id, state = "verified"}
+            else
+                local reason = ok and type(why) == "table" and why.reason or tostring(result)
+                op.growth = {seed_id = seed.seed_id, state = "unverified", reason = reason}
+            end
+        elseif writes == "none" then
+            pcall(ops.growth.void, seed)
+            op.growth = {state = "void"}
+        end
+    end
+
     -- Every terminal transition goes through here: it invalidates pending
     -- callbacks, stops outstanding work, records the outcome and frees the slot.
     local function finish(act, state, writes, err, extra)
@@ -126,6 +159,7 @@ function outward.new(ops)
         op.error = err and copy(err) or nil
         for k, v in pairs(extra or {}) do op[k] = v end
         op.aggregate = copy(act.agg)
+        settle_seed(op, state, writes)
         save(op)
         self.active = nil
         jobs:release(act.slot)
@@ -202,6 +236,8 @@ function outward.new(ops)
             return finish(act, "failed", "none", error_result("storage_failed",
                 "the server map save interval is too long to guarantee durability before construction"))
         end
+        local _, claim_err = claimed(op.settlement_id, op.exit_id)
+        if claim_err then return finish(act, "failed", "none", claim_err) end
         local start, goal = plan.endpoints.start, plan.endpoints.goal
         local footprint
         for _, w in ipairs(plan.writes) do
@@ -228,16 +264,30 @@ function outward.new(ops)
                 preview_geometry[table.remove(preview_order, 1)] = nil
             end
         end
+        -- Record the intended growth seed (and the operation's reference to it)
+        -- before the durability wait. Failure only means "not growth-ready".
+        if ops.growth then
+            local made, seed, seed_err = pcall(ops.growth.prepare, op, plan, act.descriptor)
+            if made and seed then op.growth = {seed_id = seed.seed_id, state = "intended"}
+            else
+                local why = made and type(seed_err) == "table" and seed_err or error_result("seed_unavailable", tostring(seed))
+                op.growth = {state = "unseeded", code = why.code, reason = why.reason}
+            end
+        end
         op.state = "building"; op.writes = "unknown"; op.aggregate = copy(act.agg)
         local saved, save_err = save(op, true)
         if not saved then
             -- Zero writes were made. Undo the in-memory commitment and make a
             -- best-effort attempt to replace the durable "building" record.
             op.road = nil; op.state = "planning"; op.writes = "none"
+            if op.growth and op.growth.state == "intended" then settle_seed(op, "failed", "none") end
             return finish(act, "failed", "none", save_err)
         end
         set_stage(act, "durability_wait")
         later(act, function()
+            -- Synchronous construction preflight: a claim may have arrived during the wait.
+            local _, late_claim = claimed(op.settlement_id, op.exit_id)
+            if late_claim then return finish(act, "failed", "none", late_claim) end
             set_stage(act, "building")
             local started, builder, build_err
             local token = act.token
@@ -436,6 +486,8 @@ function outward.new(ops)
                 and "this settlement already has a built outward road"
                 or "this exit has a partial or uncertain outward road", detail)
         end
+        local _, claim_err = claimed(request.settlement_id, request.exit_id)
+        if claim_err then return nil, claim_err end
         local act = {token = 0, index = 0, stage = "planning", chunks = {}, max_union = 0, outcomes = {},
             agg = new_aggregate(), descriptor = descriptor, settlement = settlement, config = config}
         local policy_ok, policy = pcall(copy, request.policy or {})
@@ -491,10 +543,28 @@ function outward.new(ops)
         return op and summarize(op) or nil
     end
 
+    -- A copy of a stored operation by id, for growth adoption. Never active ones.
+    function self:operation(op_id)
+        if type(op_id) ~= "string" then return nil end
+        local settlement_id = op_id:match("^(.-)/")
+        if not settlement_id or settlement_id == "" then return nil end
+        local op = store:find(settlement_id, op_id)
+        if not op then return nil end
+        if self.active and self.active.op == op then return nil end
+        local result = copy(op)
+        result.persist_failed = op.persist_failed
+        return result
+    end
+
     -- 'open' | 'active' | 'reserved' | 'unreadable' for a settlement, or for one of its exits.
     function self:eligibility(settlement_id, exit_id)
         if self.active and self.active.op.settlement_id == settlement_id then return "active", {op_id = self.active.op.op_id} end
-        return store:eligibility(settlement_id, exit_id)
+        local state, detail = store:eligibility(settlement_id, exit_id)
+        if state == "open" and exit_id ~= nil then
+            local _, claim_err = claimed(settlement_id, exit_id)
+            if claim_err then return claim_err.code == "already_reserved" and "claimed" or "unreadable", claim_err end
+        end
+        return state, detail
     end
 
     -- Startup sweep (called once). Never builds anything.
