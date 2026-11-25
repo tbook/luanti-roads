@@ -4,10 +4,15 @@
 -- storage are the real engine's. The growth steps go through the registered
 -- /roads_grow definition.
 --
--- Cycles 1 and 2 run with fake destination providers (destination steering and
--- fallback; the trajectory is the same straight 96-node cycle): a distant town
--- gives a waypoint (partial_progress), a reachable one has no attachment provider
--- so it is rejected as unsupported and the real directional fallback builds.
+-- Destinations are the real towns_destinations provider and resolver over the real
+-- towns_adapter and a scripted towns_api (the Towns mod itself is not loaded): the
+-- published exits are really built in the world (layout.towns), so cycle 1 steers by
+-- waypoint toward a distant town (partial_progress), cycle 2 meets a town whose exit
+-- faces away from the road (rejected before any write; the real 96-node fallback
+-- builds), cycle 3 sees no town, and the fourth cycle is a final attachment to the
+-- graded width-4 exit, which is the cycle that is cut off. In phase 2 that
+-- attachment is retried (planning cut: connected, walked) or inspected (build cut:
+-- uncertain, claim kept, geometry compared). The straight trajectory is the same.
 --
 -- Phase 1 (fresh world): pre-fill a flat stone area with obstacle walls
 -- (layout.lua), build a fresh outward road that records a growth seed, adopt it,
@@ -30,10 +35,14 @@ planner.set_seam_dependencies(seam, raster); plans.set_seam_dependency(seam); bu
 local outward, outward_store, growth, growth_store = load('outward'), load('outward_store'), load('growth'), load('growth_store')
 local commands = load('commands')
 local growth_policy = load('growth_policy')
+local connectors, towns_adapter, towns_destinations = load('connectors'), load('towns_adapter'), load('towns_destinations')
 local access = surface.engine_access(core)
 local SID, EXIT = 'trial:0:0', '+x:200:0'
 local COBBLE, DIRT = 'mcl_core:cobble', 'mcl_core:dirt'
 local ORIGIN_X, CYCLE = 248, layout.CYCLE_LENGTH   -- seed endpoint x; nodes per continuation cycle
+local TOWNS = layout.towns(ORIGIN_X)
+local STEER = TOWNS.steer.exits[1]               -- the exit the road finally attaches to
+local STEER_FULL_ID = TOWNS.steer.id .. '/' .. STEER.id
 local EXPECT_KEY = 'trial_expect'
 local function timer(p) return core.get_node_timer(p):is_started() end
 local function copy(v)
@@ -54,7 +63,7 @@ local function guarded(fn)
 end
 
 -- The area must cover every survey window: 4 cycles of 96 nodes plus 32 margin.
-local a, b = {x = 160, y = -32, z = -40}, {x = 680, y = 31, z = 40}
+local a, b = {x = 160, y = -32, z = -40}, {x = 680, y = 31, z = 70}
 
 local function fill_area()
     local vm = core.get_voxel_manip()
@@ -65,6 +74,58 @@ local function fill_area()
     local wall = core.get_content_id(layout.WALL_NODE)
     layout.each_wall_node(ORIGIN_X, function(x, y, z) data[area:index(x, y, z)] = wall end)
     vm:set_data(data); vm:write_to_map(); vm:update_map()
+    -- Really built published exits (real stair and slab nodes with their facedirs).
+    for _, town in pairs(TOWNS) do
+        layout.each_exit_node(town.exits[1], function(x, y, z, name, param2)
+            core.set_node({x = x, y = y, z = z}, {name = name, param2 = param2})
+        end)
+    end
+end
+
+-- Independent walking oracle over the real world: breadth-first search over columns
+-- whose top node is a road, stair or slab with three clear nodes above it; a step to a
+-- neighbouring column may rise at most one node. Returns the set of reached "x:z" keys.
+local function walk_world(sx, sz, box)
+    core.load_area({x = box.x1, y = -8, z = box.z1}, {x = box.x2, y = 8, z = box.z2})
+    local function standing(x, z)
+        for y = 6, -4, -1 do
+            local n = core.get_node({x = x, y = y, z = z})
+            if n.name ~= 'air' then
+                local height = n.name == 'mcl_stairs:slab_cobble' and y
+                    or (n.name == 'mcl_core:cobble' or n.name == 'mcl_stairs:stair_cobble') and y + 0.5
+                if not height then return nil end
+                for dy = 1, 3 do
+                    if core.get_node({x = x, y = y + dy, z = z}).name ~= 'air' then return nil end
+                end
+                return height
+            end
+        end
+    end
+    local seen, queue = {}, {{x = sx, z = sz}}
+    local first = standing(sx, sz)
+    if not first then return seen end
+    seen[sx .. ':' .. sz] = first
+    local i = 1
+    while i <= #queue do
+        local p = queue[i]; i = i + 1
+        for _, d in ipairs({{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) do
+            local x, z = p.x + d[1], p.z + d[2]
+            local id = x .. ':' .. z
+            if not seen[id] and x >= box.x1 and x <= box.x2 and z >= box.z1 and z <= box.z2 then
+                local here = standing(x, z)
+                if here and math.abs(here - seen[p.x .. ':' .. p.z]) <= 1 then
+                    seen[id] = here; queue[#queue + 1] = {x = x, z = z}
+                end
+            end
+        end
+    end
+    return seen
+end
+-- Does the walk from the seam reach every column of the built exit's first row?
+local function arrived(from_x)
+    local reached = walk_world(from_x, 0, {x1 = from_x - 4, x2 = STEER.columns[1].x + 2, z1 = -20, z2 = 20})
+    for _, c in ipairs(STEER.columns) do if not reached[c.x .. ':' .. c.z] then return false end end
+    return true
 end
 
 -- Logs why a column is or is not known natural ground (diagnostic only).
@@ -140,6 +201,40 @@ local function services(trap, counters)
     end
     local config = {world = {chunksize = 5}, planner = {weights = {slope = 4, turn = 2, cut = 1, fill = 1}, road_material = COBBLE},
         composition = {road_material = COBBLE}}
+    -- Scripted towns_api v1: which published settlements exist is a per-cycle choice.
+    local visible = {}
+    local api = {version = 1}
+    local function sorted_visible()
+        local list = {}
+        for _, town in pairs(TOWNS) do if visible[town.id] then list[#list + 1] = town end end
+        table.sort(list, function(p, q) return p.id < q.id end)
+        return list
+    end
+    function api.available() return true end
+    function api.settlement(id)
+        for _, town in ipairs(sorted_visible()) do if town.id == id then return copy(town) end end
+        return nil, 'not_found', 'no such settlement'
+    end
+    function api.settlements() local list = {}; for _, t in ipairs(sorted_visible()) do list[#list + 1] = copy(t) end; return list end
+    function api.exclusions(rect)
+        local list = {}
+        for _, town in ipairs(sorted_visible()) do
+            local rects = {copy(town.core)}
+            for _, r in ipairs(town.structures) do rects[#rects + 1] = copy(r) end
+            local hit = false
+            for _, r in ipairs(rects) do
+                if r.x1 <= rect.x2 and r.x2 >= rect.x1 and r.z1 <= rect.z2 and r.z2 >= rect.z1 then hit = true end
+            end
+            if hit then list[#list + 1] = {id = town.id, kind = 'settlement', state = 'complete', rects = rects, y_min = -10, y_max = 40} end
+        end
+        return list
+    end
+    function api.writer() return nil end
+    local adapter = towns_adapter.new(function() return api end, now)
+    local outward_service_ref
+    local dest = towns_destinations.new({towns = adapter, outward = function() return outward_service_ref end,
+        connectors = connectors, edges = edges, raster = raster, surface = surface, access = access,
+        load = function(minp, maxp) return core.load_area(minp, maxp) end, has_timer = timer, owner = growth.OWNER})
     local descriptor = {api_version = 1, settlement_id = SID, exit_id = EXIT, source = 'trial', direction = {x = 1, z = 0},
         anchor = {x = 200, y = 0, z = 0}, columns = {{x = 200, z = 0}, {x = 200, z = 1}}, length = 3,
         profile = {{y = 0, name = COBBLE, param2 = 0}}, center = {x = 190, y = 0, z = 0}, town_type = 'village'}
@@ -157,13 +252,9 @@ local function services(trap, counters)
     local ostore = outward_store.new({storage = storage, serialize = core.serialize, deserialize = deserialize, now = os.time})
     local interval = function() return tonumber(core.settings:get('server_map_save_interval')) or 5.3 end
     local outward_service
-    local providers = {}   -- fake destination providers
-    -- Fake attachment provider: waypoints are revision-checkable; final attachments are unsupported.
-    local attachments = {town = {resolve = function(_, d, ctx)
-        if ctx.mode == 'final' then return nil, {code = 'unsupported_attachment', reason = 'the trial has no final attachment'} end
-        return {revision = d.revision, recheck = function() return true end}
-    end}}
-    local service = check(growth.new({policy = growth_policy, providers = providers, attachments = attachments, store = gstore, jobs = slot_jobs, now = now, after = core.after, raster = raster, seam = seam,
+    local service = check(growth.new({policy = growth_policy, providers = dest.providers, attachments = dest.attachments,
+        destination_unavailable = dest.unavailable, towns = adapter, wrap_terrain = towns_adapter.wrap_terrain,
+        store = gstore, jobs = slot_jobs, now = now, after = core.after, raster = raster, seam = seam,
         access = access, has_timer = timer, classify = surface.classify, load_area = core.load_area,
         world_config = function() return config end, survey = survey, start_survey = start_survey, new_planner = new_planner,
         compose = compose, start_build = start_build, save_interval = interval,
@@ -183,6 +274,7 @@ local function services(trap, counters)
     assert(commands.register({register_chatcommand = function(name, def) command_defs[name] = def end,
         get_player_by_name = function() return nil end}, slot_jobs, surface, function() return config end,
         nil, nil, {service = service}))
+    outward_service_ref = outward_service
     -- Same startup order as init.lua.
     outward_service:recover(); service:recover()
     local function try(text) return command_defs.roads_grow.func('trial', text) end
@@ -191,7 +283,8 @@ local function services(trap, counters)
         assert(ok, msg)
         return msg
     end
-    return {service = service, outward = outward_service, gstore = gstore, providers = providers, slot_jobs = slot_jobs, try = try, grow = grow}
+    local function show(towns) visible = {}; for _, t in ipairs(towns) do visible[t.id] = true end end
+    return {service = service, outward = outward_service, gstore = gstore, show = show, slot_jobs = slot_jobs, try = try, grow = grow}
 end
 
 -- Polls predicate every half second (80 s limit), then calls then_do. Both run guarded.
@@ -243,31 +336,25 @@ local function phase_one_body(done, mod_storage)
         local walk
         walk = function(cycle)
             if cycle > 3 then return s.finish_walk() end
-            local x = ORIGIN_X + CYCLE * (cycle - 1)
-            s.providers.town = nil
-            if cycle <= 2 then
-                -- cycle 1: 400 nodes ahead (waypoint); cycle 2: 160 nodes ahead (final range)
-                local ahead = cycle == 1 and 400 or 160
-                s.providers.town = {nearby = function()
-                    return {truncation = 'none', items = {{version = 1, kind = 'town', id = 'trial-town', approach_id = 'trial-town/east',
-                        position = {x = x + ahead, y = 0, z = 0}, direction = {x = -1, z = 0}, revision = 1}}}
-                end}
-            end
+            -- cycle 1: a distant compatible town (waypoint); cycle 2: a town whose exit
+            -- faces away (rejected, real fallback); cycle 3: none in the world's data.
+            s.show(cycle == 1 and {TOWNS.steer} or cycle == 2 and {TOWNS.away} or {})
             assert(grow('extend ' .. road_id):find('Growth cycle ' .. road_id .. ':s' .. (cycle + 1) .. ':r' .. cycle .. ' started', 1, true))
             wait(function() return service.active == nil end, function()
                 local now_status = check(service:status(road_id))
                 local report = grow('status ' .. road_id)
                 if cycle == 1 then
                     assert(report:find('built (partial_progress)', 1, true) and report:find('waypoint attachment, 400 nodes away', 1, true)
-                        and report:find('destination trial-town/east (waypoint) composed', 1, true), report)
+                        and report:find('destination ' .. STEER.id .. ' (waypoint) composed', 1, true), report)
+                    assert(gstore:claim('exit:' .. STEER_FULL_ID) == nil, 'a waypoint claims nothing')
                     core.log('action', 'GROWTH_TRIAL_STEERING ' .. report)
                 elseif cycle == 2 then
                     assert(report:find('built (directional)', 1, true)
-                        and report:find('destination trial-town/east (final) unsupported_attachment', 1, true)
+                        and report:find('destination ' .. TOWNS.away.exits[1].id .. ' (final) incompatible_heading', 1, true)
                         and report:find('96 node fallback composed', 1, true), report)
                     core.log('action', 'GROWTH_TRIAL_FALLBACK ' .. report)
                 else
-                    assert(report:find('scan disabled', 1, true) and report:find('built (directional)', 1, true), report)
+                    assert(report:find('Selected: none', 1, true) and report:find('built (directional)', 1, true), report)
                 end
                 assert(now_status.state == 'open' and now_status.revision == cycle + 1
                     and now_status.endpoint.x == ORIGIN_X + CYCLE * cycle, core.serialize(now_status))
@@ -306,6 +393,7 @@ local function phase_one_body(done, mod_storage)
                 endpoint = road.endpoint, mode = mode, edit = edit,
                 ahead = ahead, ahead_name = ahead_name, segments = road.segments}))
             trap.survey, trap.build = mode == 'planning', mode == 'build'
+            s.show({TOWNS.steer})   -- 112 nodes ahead: a final attachment, which is what gets cut off
             assert(grow('extend ' .. road_id):find('started', 1, true))
             wait(function() return fired end, function() end)
         end
@@ -355,15 +443,28 @@ local function phase_two(done, mod_storage)
             assert(node_name(edit) == DIRT and check(gstore:road(road_id)).state == 'stopped', 'retry repaired or reopened')
             assert(counters.surveys == 0, 'retry surveyed with an edited seam')
             core.swap_node(edit, {name = edit.name})
+            s.show({TOWNS.steer})
             assert(grow('retry ' .. road_id):find('Retry started as growth cycle', 1, true))
             wait(function() return service.active == nil end, function()
+                -- The retried cycle is the final attachment that was cut off: it connects.
                 local after = check(service:status(road_id))
-                assert(after.state == 'open' and after.revision == expect.revision + 1
-                    and after.endpoint.x == expect.endpoint.x + CYCLE, core.serialize(after))
+                assert(after.state == 'connected' and after.revision == expect.revision + 1
+                    and after.connected.approach_id == STEER.id and after.connected.id == TOWNS.steer.id, core.serialize(after))
                 local bends = count_bends(gstore, after.last_segment_id)
-                assert(bends >= 2, 'retried cycle has only ' .. bends .. ' bends')
-                assert(grow('inspect ' .. road_id):find('World: matches_intended', 1, true))
-                core.log('action', 'GROWTH_TRIAL_RETRY ' .. core.serialize({revision = after.revision, endpoint = after.endpoint, bends = bends}))
+                assert(bends >= 2, 'the attachment has only ' .. bends .. ' bends')
+                local record = check(gstore:load_record(after.last_segment_id))
+                local final = record.headings[#record.headings]
+                assert(final == 7 or final == 0 or final == 1, 'arrival heading ' .. final .. ' does not face into the town')
+                local claim = check(gstore:claim('exit:' .. STEER_FULL_ID))
+                assert(claim.state == 'held' and claim.road_id == road_id, 'the full exit id stays claimed')
+                assert(arrived(expect.endpoint.x), 'no walkable path from the seam onto the built exit')
+                local inspected = grow('inspect ' .. road_id)
+                assert(inspected:find('World: matches_intended', 1, true) and inspected:find('matches the intended geometry', 1, true), inspected)
+                local admitted, why = s.outward:start({settlement_id = TOWNS.steer.id, exit_id = STEER.id, requester = 'trial',
+                    policy = {version = 1, seed = 1}, candidates = {{x = 700, z = 0}}})
+                assert(not admitted and why.code == 'already_reserved' and why.scope == 'exit', 'an outward road may not start from a claimed exit')
+                core.log('action', 'GROWTH_TRIAL_ARRIVAL ' .. core.serialize({state = after.state, endpoint = after.endpoint,
+                    revision = after.revision, bends = bends, final_heading = final, walkable = true, claim = claim.state}))
                 done()
             end)
         else
@@ -374,7 +475,16 @@ local function phase_two(done, mod_storage)
             local ok2, report = try('inspect ' .. road_id)
             assert(ok2 and report:find('World:', 1, true), tostring(report))
             assert(counters.builds == 0 and counters.surveys == 0 and check(gstore:road(road_id)).state == 'uncertain')
-            core.log('action', 'GROWTH_TRIAL_UNCERTAIN_INSPECT ' .. report:gsub('\n', ' | '))
+            -- The cut-off final attachment: its reservation, geometry and walkability after a restart.
+            assert(check(gstore:claim('exit:' .. STEER_FULL_ID)).state == 'uncertain', 'the exit claim is kept, uncertain')
+            assert(report:find('World: matches_intended', 1, true) and report:find('Attachment: checked', 1, true)
+                and report:find('matches the intended geometry', 1, true), report)
+            local admitted, why = s.outward:start({settlement_id = TOWNS.steer.id, exit_id = STEER.id, requester = 'trial',
+                policy = {version = 1, seed = 1}, candidates = {{x = 700, z = 0}}})
+            assert(not admitted and why.code == 'already_reserved', 'the persisted incoming claim blocks /roads_outward')
+            assert(arrived(expect.endpoint.x), 'the written geometry should be walkable even though it is never promoted')
+            assert(not check(gstore:road(road_id)).connected, 'an uncertain attachment is never connected')
+            core.log('action', 'GROWTH_TRIAL_ATTACHMENT_INSPECT ' .. report:gsub('\n', ' | '))
             done()
         end
     end)

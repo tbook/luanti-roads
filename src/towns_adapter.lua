@@ -6,6 +6,7 @@ local adapter = {}
 
 local SUPPORTED_VERSION = 1
 local DEFER_LIMIT = 180
+local TOWNS_LIST_MAX = 32 -- towns_api v1 returns at most this many settlements
 local full, slab, stair = "mcl_core:cobble", "mcl_stairs:slab_cobble", "mcl_stairs:stair_cobble"
 -- Facedirs match connectors.lua: +Z=0, +X=1, -Z=2, -X=3.
 local facedirs = {["0:1"]=0, ["1:0"]=1, ["0:-1"]=2, ["-1:0"]=3}
@@ -152,22 +153,40 @@ function adapter.new(get_api, now)
 
     -- Completed published settlements whose centre lies within radius (horizontal)
     -- of pos, nearest first. Malformed entries are dropped, never repaired.
-    function self:nearby(pos, radius)
+    -- `limit` (1..32, default 32) bounds the result. `scan` also reports
+    -- completeness: "truncated" when more entries came back than `limit` allows,
+    -- "possible" when Towns returned its own maximum of 32 (the registry may hold
+    -- more; v1 has no truncation flag) and "none" otherwise.
+    function self:scan(pos, radius, limit)
         local a, e = api(); if not a then return nil, e end
         local good, aerr = self:available(); if not good then return nil, aerr end
         if type(pos) ~= "table" or type(pos.x) ~= "number" or type(pos.z) ~= "number" then
             return err("invalid_request", "a horizontal position is required")
+        end
+        if limit == nil then limit = TOWNS_LIST_MAX end
+        if not integer(limit) or limit < 1 or limit > TOWNS_LIST_MAX then
+            return err("invalid_request", "limit must be an integer from 1 to " .. TOWNS_LIST_MAX)
         end
         local called, list, why, code = pcall(a.settlements, {x = pos.x, z = pos.z}, radius)
         if not called or type(list) ~= "table" then
             return err("towns_unavailable", "Towns settlement list is unavailable: " .. tostring(called and (code or why) or list))
         end
         local result = {}
-        for _, s in ipairs(list) do
+        for i, s in ipairs(list) do
+            if i > limit then break end
             if type(s) == "table" and type(s.id) == "string" and s.id ~= "" and well_formed(s) then
                 result[#result + 1] = copy(s)
             end
         end
+        local truncation = "none"
+        if #list > limit then truncation = "truncated"
+        elseif #list >= TOWNS_LIST_MAX then truncation = "possible" end
+        return result, {truncation = truncation, returned = #list}
+    end
+
+    function self:nearby(pos, radius, limit)
+        local result, info = self:scan(pos, radius, limit)
+        if not result then return nil, info end
         return result
     end
 
@@ -254,7 +273,12 @@ function adapter.new(get_api, now)
     -- every Towns exclusion of any kind or state plus the footprints of the
     -- other published exits. The selected exit's own steps are protected by
     -- the connector's preserved constraints instead.
-    function self:overlay(rect, source, selected_exit_id)
+    -- `approaches` (optional, at most 4 {settlement_id, exit_id}) names exits a
+    -- road is about to attach to: only the exit's built rows (steps 0..L-1) stay
+    -- masked as structures while the seam row (step L) and everything beyond is
+    -- left to the Towns exclusions. Nothing is subtracted from an exclusion and
+    -- no exit rectangle, core or reservation is ever removed from the mask.
+    function self:overlay(rect, source, selected_exit_id, approaches)
         local a, e = api(); if not a then return nil, e end
         if not valid_rect({x1 = rect.x1, z1 = rect.z1, x2 = rect.x2, z2 = rect.z2}) then
             return err("towns_unavailable", "invalid survey rectangle")
@@ -271,10 +295,24 @@ function adapter.new(get_api, now)
                 if overlaps(r, rect) then rects[#rects + 1] = {x1 = r.x1, z1 = r.z1, x2 = r.x2, z2 = r.z2} end
             end
         end
+        local named = {}
+        if approaches ~= nil then
+            if type(approaches) ~= "table" or #approaches > 4 then
+                return err("towns_unavailable", "too many selected approaches")
+            end
+            for _, a2 in ipairs(approaches) do
+                if type(a2) ~= "table" or type(a2.settlement_id) ~= "string" or type(a2.exit_id) ~= "string" then
+                    return err("towns_unavailable", "invalid selected approach")
+                end
+                named[a2.settlement_id .. "/" .. a2.exit_id] = true
+            end
+        end
         local function add_exits(settlement, skip)
             for _, ex in ipairs(settlement.exits or {}) do
                 if ex.id ~= skip and type(ex.direction) == "table" and type(ex.columns) == "table" and integer(ex.length) then
-                    local r = strip_rect(ex.columns, ex.direction, ex.length) -- steps 0..L, including the seam
+                    local steps = ex.length -- steps 0..L, including the seam
+                    if named[tostring(settlement.id) .. "/" .. tostring(ex.id)] then steps = ex.length - 1 end
+                    local r = strip_rect(ex.columns, ex.direction, steps)
                     if r and overlaps(r, rect) then rects[#rects + 1] = r end
                 end
             end

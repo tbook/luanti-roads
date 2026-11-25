@@ -136,4 +136,47 @@ test('restart after construction began but before the result was saved is uncert
     assert(text:find('Stop: interrupted', 1, true) and text:find('uncertain', 1, true), text)
 end)
 
+test('the trial towns steer, are rejected for a bad heading, and finally take a walkable arrival at the graded width-4 exit', function()
+    local fx = dofile('tests/towns_destinations_fixture.lua')
+    local w = fx.setup()
+    local h = w.h
+    local road_id = w.adopt()
+    local origin = h.road(road_id).endpoint.x
+    local towns = layout.towns(origin)
+    local steer, away = towns.steer, towns.away
+    for _, town in pairs(towns) do
+        layout.each_exit_node(town.exits[1], function(x, y, z, name, param2) h.set(x, y, z, {name = name, param2 = param2}) end)
+        w.fake.records[town.id] = town
+    end
+    local function show(list)
+        w.fake.others, w.fake.items = {}, {}
+        for _, town in ipairs(list) do w.fake.others[#w.fake.others + 1] = town; w.fake.exclude_settlement(town) end
+    end
+    local function status() return assert(h.growth:status(road_id)) end
+    show({steer})
+    assert(h.run_cycle(road_id))
+    local a = h.road(road_id).attempts[1]
+    assert(a.result == 'partial_progress' and a.candidates[1].mode == 'waypoint' and a.candidates[1].distance == 400
+        and h.growth_store:claim('exit:'..steer.id..'/'..steer.exits[1].id) == nil)
+    show({away})
+    assert(h.run_cycle(road_id))
+    a = h.road(road_id).attempts[2]
+    assert(a.result == 'directional' and a.targets[1].outcome == 'incompatible_heading' and a.targets[2].length == 96)
+    show({})
+    assert(h.run_cycle(road_id))
+    assert(h.road(road_id).attempts[3].result == 'directional' and #h.road(road_id).attempts[3].candidates == 0)
+    local seam_x = status().endpoint.x
+    assert(seam_x == origin + 288)
+    show({steer})
+    assert(h.run_cycle(road_id))
+    local road = h.road(road_id)
+    assert(road.state == 'connected' and road.connected.approach_id == steer.exits[1].id, tostring(road.stop and road.stop.reason))
+    local reached = fx.walk(h, seam_x, 0, {x1 = seam_x - 4, x2 = origin + 402, z1 = -20, z2 = 20})
+    for _, c in ipairs(steer.exits[1].columns) do assert(reached[c.x..':'..c.z], 'the exit column '..c.x..':'..c.z) end
+    local final = assert(h.growth_store:load_record(road.last_segment_id)).headings
+    assert(({[7] = true, [0] = true, [1] = true})[final[#final]])
+    assert(select(2, h.outward:start({settlement_id = steer.id, exit_id = steer.exits[1].id, requester = 'x', policy = {version = 1, seed = 1},
+        candidates = {{x = origin + 450, z = 0}}})).code == 'already_reserved')
+end)
+
 print('ok - '..count..' growth trial dry-run tests')

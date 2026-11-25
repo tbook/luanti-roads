@@ -30,6 +30,64 @@ function layout.each_wall_node(origin_x, fn)
     end
 end
 
+-- Published Towns exits that really exist in the trial world (ground y = 0), in the
+-- shape towns_api publishes them. `steer` faces west and lies 400 nodes ahead of the
+-- first seam (a distant, compatible town: waypoint, then the final attachment once
+-- it is in range); its exit is graded (stair, slab) and four wide. `away` lies
+-- 160 nodes ahead of the second seam, 30 nodes aside, with an exit that faces east,
+-- away from the road: it can never be entered heading into the town.
+local FACEDIR = {['1:0'] = 1, ['-1:0'] = 3, ['0:1'] = 0, ['0:-1'] = 2}
+local COBBLE, STAIR, SLAB = 'mcl_core:cobble', 'mcl_stairs:stair_cobble', 'mcl_stairs:slab_cobble'
+function layout.exit(direction, kind, width, ox, oz)
+    local d = direction
+    local p2 = FACEDIR[d.x .. ':' .. d.z]
+    local profile = {}
+    if kind == 'flat' then
+        for n = 1, 6 do profile[n] = {y = 0, name = COBBLE, param2 = 0} end
+    else -- 'down': a graded exit one node above the ground that descends outward
+        profile = {{y = 1, name = COBBLE, param2 = 0}, {y = 1, name = STAIR, param2 = (p2 + 2) % 4}, {y = 1, name = SLAB, param2 = 0}}
+    end
+    local columns = {}
+    for l = 0, width - 1 do
+        columns[#columns + 1] = {x = ox + ((d.z == 0) and 0 or -l * d.z), z = oz + ((d.x == 0) and 0 or l * d.x)}
+    end
+    table.sort(columns, function(a, b)
+        if d.x ~= 0 then return a.z < b.z end
+        return a.x < b.x
+    end)
+    local label = (d.x == 1 and '+x') or (d.x == -1 and '-x') or (d.z == 1 and '+z') or '-z'
+    return {id = label .. ':' .. columns[1].x .. ':' .. columns[1].z, source = 'street', direction = {x = d.x, z = d.z},
+        columns = columns, length = #profile, profile = profile}
+end
+
+-- Calls fn(x, y, z, name, param2) for each built node of a published exit.
+function layout.each_exit_node(exit, fn)
+    for n = 0, exit.length - 1 do
+        local entry = exit.profile[n + 1]
+        for _, c in ipairs(exit.columns) do
+            fn(c.x + exit.direction.x * n, entry.y, c.z + exit.direction.z * n, entry.name, entry.param2)
+        end
+    end
+end
+
+local function settlement(id, exit, core)
+    return {id = id, site_id = 'trial', state = 'complete', town_type = 'medieval', exits = {exit}, core = core,
+        structures = {{x1 = core.x2 + 1, z1 = core.z1, x2 = core.x2 + 4, z2 = core.z1 + 4}},
+        center = {x = math.floor((core.x1 + core.x2) / 2), y = 0, z = math.floor((core.z1 + core.z2) / 2)},
+        reservation = {min = {x = core.x1 - 30, y = -10, z = core.z1 - 30}, max = {x = core.x2 + 30, y = 40, z = core.z2 + 30}}}
+end
+
+-- origin_x is the seed endpoint x. Returns {steer = settlement, away = settlement}.
+function layout.towns(origin_x)
+    local west, east = {x = -1, z = 0}, {x = 1, z = 0}
+    local steer_x = origin_x + 400
+    local away_x = origin_x + layout.CYCLE_LENGTH + 160
+    return {
+        steer = settlement('trial:town-east', layout.exit(west, 'down', 4, steer_x, 0), {x1 = steer_x + 1, z1 = -30, x2 = steer_x + 52, z2 = 30}),
+        away = settlement('trial:town-away', layout.exit(east, 'flat', 2, away_x, 30), {x1 = away_x - 34, z1 = 12, x2 = away_x - 1, z2 = 60}),
+    }
+end
+
 -- Number of direction changes along a centerline of {x, z} points.
 function layout.bends(centerline)
     local count, px, pz = 0, nil, nil

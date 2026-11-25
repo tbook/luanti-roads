@@ -430,6 +430,200 @@ function connectors.exit_endpoints(terrain,desc,target,access,load,surface,edges
     return matches
 end
 
+-- Heading indices follow edges.lua: 0=(1,0) 1=(1,1) 2=(0,1) 3=(-1,1) 4=(-1,0) 5=(-1,-1) 6=(0,-1) 7=(1,-1).
+local HEADINGS={{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1}}
+
+-- Final headings that face into the town: opposite the published outward
+-- vector, plus its two 45-degree neighbours (the one allowed final bend).
+function connectors.arrival_headings(direction)
+    for i,h in ipairs(HEADINGS) do
+        if h[1]==-direction.x and h[2]==-direction.z then
+            local result={(i-2)%8,i-1,i%8}
+            table.sort(result)
+            return result
+        end
+    end
+end
+
+local WIDE={min_x=-31000,max_x=31000,min_y=-31000,max_y=31000,min_z=-31000,max_z=31000}
+
+-- Re-read a published exit from the world: every node must match its profile,
+-- stay unprotected and free of metadata, and keep support, headroom and
+-- daylight. Used immediately before construction; never emerges terrain.
+-- env = {access, load, classify, owner}.
+function connectors.inspect_published_exit(desc,env)
+    if type(env)~='table' or type(env.access)~='table' or type(env.load)~='function'
+        or type(env.classify)~='function' then return fail('connector inspection is unavailable') end
+    if not valid_descriptor(desc) then return fail('invalid published exit descriptor') end
+    local read=reader({bounds=WIDE,owner=env.owner},env.access,env.load)
+    local c,why,where=inspect_exit(read,desc,env.classify,env.access)
+    if not c then return fail(why,where) end
+    return c
+end
+
+-- The arrival side of a published exit for a growth road ending at `start`
+-- (a seam endpoint {x,y,z}): inspect the built exit, choose a natural landing
+-- on the start's four-node lattice outside the destination footprint, build the
+-- same transition and landing cap the outward side uses, and require that the
+-- final edge can enter the landing heading into the town (opposite the
+-- published outward vector, at most one 45-degree final bend). Returns
+-- {goal=<endpoint with connector>, headings={...}} or nil, error.
+function connectors.exit_goal(terrain,desc,start,access,load,surface,edges)
+    if type(access)~='table' or type(load)~='function' then return fail('connector inspection is unavailable') end
+    if not valid_descriptor(desc) then return fail('invalid published exit descriptor') end
+    if type(start)~='table' or not integral(start.x) or not integral(start.y) or not integral(start.z) then
+        return fail('invalid growth endpoint')
+    end
+    local d=face_of(desc.direction)
+    local dx,dz=desc.anchor.x-start.x,desc.anchor.z-start.z
+    if dx*dx+dz*dz>192*192 then return fail('requested endpoints exceed 192 nodes') end
+    -- The landing lies beyond the strip's seam row; arriving heading into the
+    -- town needs the road on that outward side with room for one lattice edge.
+    local along=(start.x-desc.anchor.x)*d.x+(start.z-desc.anchor.z)*d.z
+    if along<desc.length+5 then
+        return nil,{code='incompatible_heading',position={x=desc.anchor.x,y=desc.anchor.y,z=desc.anchor.z},
+            reason='the exit faces away from the road or lies beside it; no supported arrival heading into the town'}
+    end
+    local read=reader(terrain,access,load)
+    local c,why,where=inspect_exit(read,desc,surface.classify,access)
+    if not c then return fail(why,where) end
+    local feet={x=desc.anchor.x,y=c.path[2].y,z=desc.anchor.z}
+    local origin={origin='published_exit',offsets={min=c.min,max=c.max},
+        exit={api_version=desc.api_version,settlement_id=desc.settlement_id,exit_id=desc.exit_id,source=desc.source}}
+    local headings=connectors.arrival_headings(desc.direction)
+    local options=landing_options(terrain,c,start)
+    if #options==0 then return fail('no lattice-compatible natural connector landing',c.selection) end
+    local reason,position='no supported landing fits',c.selection
+    for _,option in ipairs(options) do
+        local inside=inside_any(desc.footprint,option.landing.x,option.landing.z)
+        for _,p in ipairs(option.transition.surfaces) do
+            if inside_any(desc.footprint,p.x,p.z) then inside=true; position=p end
+        end
+        if inside then
+            reason='the landing or its transition lies inside the destination footprint'
+        else
+            local goal=make_endpoint(feet,c,option,origin)
+            local constraints,constraint_reason=edges.connector_constraints({goal=goal})
+            if not constraints then
+                reason=constraint_reason
+            else
+                for _,h in ipairs(headings) do
+                    local dir=HEADINGS[h+1]
+                    local edge=edges.evaluate(terrain,option.landing,{i=-dir[1],j=-dir[2]},h,
+                        {road_material=full,constraints=constraints})
+                    if edge.ok then return {goal=goal,headings=headings} end
+                    reason='no final edge can arrive heading into the town: '..tostring(edge.reason)
+                    position=edge.position or position
+                end
+            end
+        end
+    end
+    return fail(reason,position)
+end
+
+-- Walk the finished road onto the built exit, in the walking direction, against
+-- the live world. The exact preserved exit nodes must be unchanged, every
+-- sampled road and transition node must be a road block with clear headroom and
+-- solid support, every step must be walkable, and the road must end at the
+-- landing heading into the town. env = {access, load, classify, has_timer,
+-- raster, owner}. Returns true or nil, {code, reason, position}.
+function connectors.verify_arrival(plan,env)
+    local function bad(reason,p)
+        return nil,{code='attachment_unverified',reason=reason,position=p and {x=p.x,y=p.y,z=p.z} or nil}
+    end
+    if type(plan)~='table' or plan.version~=3 or type(plan.request)~='table' or type(env)~='table'
+        or type(env.raster)~='table' or type(env.has_timer)~='function' or type(env.classify)~='function'
+        or type(env.access)~='table' or type(env.load)~='function' then return bad('arrival inspection is unavailable') end
+    local goal=plan.endpoints and plan.endpoints.goal
+    local c=goal and goal.connector
+    local attach=plan.request.goal_attachment
+    if type(c)~='table' or c.origin~='published_exit' or type(attach)~='table' or type(attach.headings)~='table'
+        or type(c.transition)~='table' or type(c.path)~='table' or type(c.preserved)~='table'
+        or type(plan.centerline)~='table' or type(plan.headings)~='table' then
+        return bad('the plan has no published-exit arrival')
+    end
+    local last=plan.centerline[#plan.centerline]
+    if not last or last.x~=c.landing.x or last.y~=c.landing.y or last.z~=c.landing.z then
+        return bad('the road does not end at the exit landing',last)
+    end
+    local final=plan.headings[#plan.headings]
+    local allowed=false
+    for _,h in ipairs(attach.headings) do if h==final then allowed=true end end
+    if not allowed then return bad('the final heading does not face into the town') end
+    local read=reader({bounds=WIDE,owner=env.owner},env.access,env.load)
+    for _,p in ipairs(c.preserved) do
+        local node,why=read(p)
+        if not node then return bad(why,p) end
+        if node.name~=p.name or node.param2~=p.param2 or node.has_metadata or node.protected then
+            return bad('a preserved exit node changed',p)
+        end
+        local ok,timer=pcall(env.has_timer,p)
+        if not ok or timer~=false then return bad('a preserved exit node has a timer or an unknown timer state',p) end
+    end
+    local function road_node(x,y,z)
+        local node,why=read({x=x,y=y,z=z})
+        if not node then return nil,why end
+        if node.name~=full or node.param2~=0 or node.has_metadata then return nil,'the walking surface is not a plain road block' end
+        for dy=1,3 do
+            local air,why2=read({x=x,y=y+dy,z=z})
+            if not air then return nil,why2 end
+            if air.name~='air' then return nil,'the walking path lacks three clear nodes' end
+        end
+        local below,why3=read({x=x,y=y-1,z=z})
+        if not below then return nil,why3 end
+        local kind=below.name~='air' and env.classify({name=below.name,param2=below.param2},below.has_metadata)
+        if not kind or kind.kind~='natural' then return nil,'the walking surface has no solid support' end
+        return true
+    end
+    local surfaces={}
+    for i=1,#plan.centerline-1 do
+        local edge=env.raster.segment(plan.centerline[i],plan.centerline[i+1])
+        if not edge then return bad('the road geometry cannot be rasterized',plan.centerline[i]) end
+        for _,p in ipairs(edge.columns) do surfaces[p.x..':'..p.z]=p.y end
+    end
+    local walk={}
+    -- A step may rise at most `rise`; consecutive samples are at most `reach` apart (squared).
+    local function step(x,y,z,rise,reach,where)
+        local previous=walk[#walk]
+        if previous and (math.abs(y-previous.y)>rise+1e-9 or (x-previous.x)^2+(z-previous.z)^2>reach) then
+            return bad(where,{x=x,y=y,z=z})
+        end
+        walk[#walk+1]={x=x,y=y,z=z}
+        return true
+    end
+    -- The road: each lattice step is sampled at every node along it.
+    for i=1,#plan.centerline-1 do
+        local a,b=plan.centerline[i],plan.centerline[i+1]
+        for t=0,3 do
+            local x,z=a.x+t*(b.x-a.x)/4,a.z+t*(b.z-a.z)/4
+            local y=surfaces[x..':'..z]
+            if y==nil then return bad('a road sample lies outside the swept footprint',{x=x,y=a.y,z=z}) end
+            local ok,why=road_node(x,y,z); if not ok then return bad(why,{x=x,y=y,z=z}) end
+            local stepped,err=step(x,y+0.5,z,1,2.0001,'the road is not a connected walking path')
+            if not stepped then return nil,err end
+        end
+    end
+    local ok,why=road_node(last.x,last.y,last.z); if not ok then return bad(why,last) end
+    local stepped,err=step(last.x,last.y+0.5,last.z,1,2.0001,'the road is not a connected walking path')
+    if not stepped then return nil,err end
+    for _,p in ipairs(c.transition.surfaces) do
+        ok,why=road_node(p.x,p.y,p.z); if not ok then return bad(why,p) end
+    end
+    -- The transition from the landing to the seam row, then the exit from its last row to its first.
+    for i=#c.transition.path,1,-1 do
+        local p=c.transition.path[i]
+        if p.y-0.5~=c.landing.y then return bad('the transition is not flat',p) end
+        stepped,err=step(p.x,p.y,p.z,0.5,1.0001,'the transition is not a connected walking path')
+        if not stepped then return nil,err end
+    end
+    for i=#c.path,1,-1 do
+        local p=c.path[i]
+        stepped,err=step(p.x,p.y,p.z,0.5,1.5626,'the exit is not a connected walking path')
+        if not stepped then return nil,err end
+    end
+    return true
+end
+
 -- Surface and access are injected for pure tests and to avoid retaining raw
 -- terrain in the survey snapshot. Never emerges or generates terrain.
 function connectors.endpoints(terrain,first,second,access,load,surface,edges)

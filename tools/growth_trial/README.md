@@ -36,13 +36,19 @@ fourth cycle that is cut off:
 - `--interrupt build`: the real builder writes the segment, its completion is
   swallowed, and the server shuts down before the result is saved.
 
-Destination steering and fallback use fake providers only (no Towns, no
-attachment provider): cycle 1 sees a town 400 nodes ahead, so the cycle builds a
-waypoint segment and reports `built (partial_progress)` (`GROWTH_TRIAL_STEERING`);
-cycle 2 sees a town 160 nodes ahead whose final attachment the fake provider rejects as unsupported, so it
-is rejected explicitly and the real 96-node fallback builds
-(`GROWTH_TRIAL_FALLBACK`); cycle 3 has no provider (`scan disabled`). The three
-trajectories are identical, so the rest of the trial is unchanged.
+Destinations are the real `towns_destinations` provider and resolver over the real
+`towns_adapter`, with a scripted `towns_api` (the Towns mod is not loaded) whose two
+published settlements have their exits really built in the world with real
+`mcl_core:cobble`, `mcl_stairs:stair_cobble` and `mcl_stairs:slab_cobble` nodes
+(`layout.towns`): `steer` is a town 400 nodes ahead of the first seam with a graded,
+four-wide, west-facing exit; `away` lies 160 nodes ahead of the second seam, 30 nodes
+aside, with an exit that faces east, away from the road. Cycle 1 sees `steer` and
+builds a waypoint segment (`built (partial_progress)`, no claim; `GROWTH_TRIAL_STEERING`);
+cycle 2 sees only `away`, which is rejected `incompatible_heading` before any write, and
+the real 96-node fallback builds (`GROWTH_TRIAL_FALLBACK`); cycle 3 sees no town. The
+three trajectories are identical, so the walls and bends are unchanged. The fourth cycle
+sees `steer` 112 nodes ahead: a final attachment to the graded exit, which is the cycle
+that is cut off.
 
 Phase 2 (`roads_trial_phase = 2`) restarts and checks the persisted registry:
 planning interruption must read `stopped` (code `interrupted`, no pending
@@ -50,14 +56,22 @@ segment, endpoint node ahead untouched); build interruption must read
 `uncertain` (pending segment, source claim and segment entry uncertain).
 After 3 s nothing may have been surveyed or built. Planning mode then edits
 the seam, requires `retry` to be refused with `seam_changed` (still stopped),
-restores it, retries, and requires revision 5 at x 632 with a bending segment.
-Build mode requires `extend` to be refused `not_extendable`, `retry`
-`not_retryable`, and logs `inspect`.
+restores it, and retries: the retried cycle is the cut-off final attachment, so it
+must end `connected` at the exit (revision 5, a heading facing into the town,
+the full exit id claimed `held`, `inspect` matching the intended geometry), an
+independent breadth-first walk over the real world's nodes from the seam endpoint
+must reach every column of the built exit's first row (`GROWTH_TRIAL_ARRIVAL`), and
+`outward:start` from that exit must be refused `already_reserved`. Build mode
+requires `extend` to be refused `not_extendable`, `retry` `not_retryable`, the
+exit claim to be `uncertain` after the restart, `inspect` to report the exact
+exit and transition nodes as matching (`Attachment: checked N`), `outward:start`
+to be refused from the persisted claim, the written geometry to be walkable, and the
+road to stay unconnected (`GROWTH_TRIAL_ATTACHMENT_INSPECT`).
 
-Pass output: `GROWTH_TRIAL_BEND` x3, `GROWTH_TRIAL_SEAM_EDIT_REFUSED`,
-`GROWTH_TRIAL_INTERRUPT`, `GROWTH_TRIAL_PHASE1_PASS`, then
-`GROWTH_TRIAL_RESTART` and `GROWTH_TRIAL_PASS` (plus `GROWTH_TRIAL_RETRY` or
-`GROWTH_TRIAL_UNCERTAIN_INSPECT`), and `Trial passed: both phases.` Any
+Pass output: `GROWTH_TRIAL_STEERING`, `GROWTH_TRIAL_FALLBACK`, `GROWTH_TRIAL_BEND` x3,
+`GROWTH_TRIAL_SEAM_EDIT_REFUSED`, `GROWTH_TRIAL_INTERRUPT`, `GROWTH_TRIAL_PHASE1_PASS`, then
+`GROWTH_TRIAL_RESTART` and `GROWTH_TRIAL_PASS` (plus `GROWTH_TRIAL_ARRIVAL` or
+`GROWTH_TRIAL_ATTACHMENT_INSPECT`), and `Trial passed: both phases.` Any
 `GROWTH_TRIAL_FAIL` or a nonzero exit is a failure; logs are kept in the world
 directory. `--world DIR --phase 2` repeats the restart check on a kept world.
 

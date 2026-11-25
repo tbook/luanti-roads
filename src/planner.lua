@@ -103,14 +103,17 @@ function planner.new(terrain, request, config)
     local ground_b = request.provenance.goal.ground
     local pa,pb=request.provenance.start,request.provenance.goal
     local growth=request.start_seam~=nil
+    local final_headings
     if growth then
-        if not seam or not raster or pa.connector or pb.connector then
+        if not seam or not raster or pa.connector then
             return nil,failure('invalid_endpoint','growth seam dependencies or provenance are invalid')
         end
         local valid,err,overlay=seam.check_request(raster,request,terrain,config.seam_access,config.seam_has_timer)
         if not valid then return nil,err end
         terrain=overlay
-    elseif request.start_heading~=nil or pa.origin=='growth_seam' then
+        valid,err,final_headings=seam.check_goal_attachment(request)
+        if not valid then return nil,err end
+    elseif request.start_heading~=nil or pa.origin=='growth_seam' or request.goal_attachment~=nil then
         return nil,failure('invalid_endpoint','growth provenance requires a seam')
     end
     local constraints, constraint_error
@@ -220,7 +223,7 @@ function planner.new(terrain, request, config)
                 self.pending = nil
                 local rec = entry.record
                 self.metrics.expansions = self.metrics.expansions + 1; used = used + 1
-                if rec.i == goal_i and rec.j == goal_j then
+                if rec.i == goal_i and rec.j == goal_j and (not final_headings or final_headings[rec.heading]) then
                     self.goal_cost, self.goal_record = rec.g, rec
                     return success(rec)
                 end
