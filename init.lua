@@ -18,6 +18,7 @@ local preview=load("src/preview.lua")
 local build=load("src/build.lua")
 local seam=load("src/seam.lua")
 local towns_adapter=load("src/towns_adapter.lua")
+local towns_destinations=load("src/towns_destinations.lua")
 local outward_store=load("src/outward_store.lua")
 local outward=load("src/outward.lua")
 local growth_store=load("src/growth_store.lua")
@@ -101,16 +102,24 @@ do
         serialize=core.serialize,
         deserialize=function(text) return core.deserialize(text,true) end,
         now=os.time})
-    -- Growth lifecycle. /roads_grow drives it; no scheduler does. No destination
-    -- or final-attachment providers are installed until the Towns provider lands,
-    -- so cycles scan nothing and grow directionally. The outward service records
-    -- growth seeds and consults incoming claims.
+    -- Growth lifecycle. /roads_grow drives it; no scheduler does. Completed
+    -- Towns settlements are the only destination provider: the provider is absent
+    -- (cycles scan nothing and grow directionally) unless towns_api is installed,
+    -- and an installed but unhealthy Towns fails a cycle closed. The outward
+    -- service records growth seeds and consults incoming claims.
     local growth_storage={get=function(key) local v=mod_storage:get_string(key); if v=="" then return nil end return v end,
         set=function(key,value) mod_storage:set_string(key,value) end}
     local growth_db=growth_store.new({storage=growth_storage,serialize=core.serialize,
         deserialize=function(text) return core.deserialize(text,true) end,now=os.time})
     local outward_service
+    local town_destinations=towns_destinations.new({towns=towns,outward=function() return outward_service end,
+        connectors=connectors,edges=edges,raster=raster,surface=surface,access=access,
+        load=function(minp,maxp) return core.load_area(minp,maxp) end,
+        has_timer=function(pos) return core.get_node_timer(pos):is_started() end,owner=growth.OWNER,
+        present=function() return type(rawget(_G,"towns_api"))=="table" end})
     local growth_service,growth_error=growth.new({policy=growth_policy,store=growth_db,jobs=controller,now=now,after=ops.after,
+        providers=town_destinations.providers,attachments=town_destinations.attachments,
+        destination_unavailable=town_destinations.unavailable,
         raster=raster,seam=seam,access=access,has_timer=function(pos) return core.get_node_timer(pos):is_started() end,
         classify=surface.classify,load_area=function(minp,maxp) return core.load_area(minp,maxp) end,
         world_config=world_config,survey=survey,start_survey=ops.start_survey,new_planner=ops.new_planner,

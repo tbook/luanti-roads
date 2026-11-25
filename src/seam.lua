@@ -336,4 +336,28 @@ function seam.check_request(raster, request, terrain, access, has_timer)
     return true,nil,result
 end
 
+-- Optional final-attachment constraint of a growth request: the final heading
+-- must be one of one to three listed headings, and the goal must carry a
+-- published-exit connector. Returns true, nil, set (a heading set, or nil when
+-- the request has no such constraint) or nil, error.
+function seam.check_goal_attachment(request)
+    local a=request.goal_attachment
+    local goal=request.provenance and request.provenance.goal
+    local connector=type(goal)=='table' and goal.connector or nil
+    if a==nil then
+        if connector~=nil then return changed('a growth goal connector needs a goal attachment') end
+        return true,nil,nil
+    end
+    if type(a)~='table' or a.version~=1 or not array(a.headings,3) or #a.headings==0
+        or type(connector)~='table' or connector.origin~='published_exit' then
+        return changed('invalid goal attachment')
+    end
+    local set={}
+    for _,h in ipairs(a.headings) do
+        if not integer(h) or h<0 or h>7 or set[h] then return changed('invalid goal attachment headings') end
+        set[h]=true
+    end
+    return true,nil,set
+end
+
 return seam

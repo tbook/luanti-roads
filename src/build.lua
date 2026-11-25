@@ -51,7 +51,8 @@ function build.new(plan,ops,done)
     if (plan.version~=1 and plan.version~=2 and plan.version~=3)
         or (plan.version==1 and (plan.connector_version~=nil or has_connector))
         or (plan.version==2 and (plan.connector_version~=1 or not has_connector))
-        or (plan.version==3 and (plan.seam_version~=1 or plan.connector_version~=nil or has_connector))
+        or (plan.version==3 and (plan.seam_version~=1 or (e.start and e.start.connector)
+            or plan.connector_version~=((e.goal and e.goal.connector) and 1 or nil)))
         or (plan.version~=3 and plan.seam_version~=nil)
         or plan.connector or plan.connectors or e.connector or e.connectors
         or provenance.connector or provenance.connectors
@@ -101,6 +102,36 @@ function build.new(plan,ops,done)
             end
             exact[key(p)]=nil
         end
+        -- An optional arrival at a published exit: its exact preserved nodes
+        -- must be expected and never written, and the last heading must face in.
+        local arrival_ok,_,arrival_headings=seam.check_goal_attachment(request)
+        if not arrival_ok then return nil,fail('build_failed','invalid goal attachment') end
+        local goal_connector=e.goal.connector
+        local transition_surfaces={}
+        if goal_connector then
+            local c=goal_connector
+            if c.version~=1 or c.origin~='published_exit' or not dense_array(c.preserved,50000) or #c.preserved==0
+                or type(c.transition)~='table' or not dense_array(c.transition.surfaces,50000)
+                or not valid_position(c.landing) or not arrival_headings
+                or not arrival_headings[plan.headings[#plan.headings]]
+                or not equal(plan.centerline[#plan.centerline],c.landing) then
+                return nil,fail('build_failed','invalid arrival connector')
+            end
+            for _,p in ipairs(c.preserved) do
+                local q=exact[key(p)]
+                if not valid_position(p) or not q or written[key(p)] or q.name~=p.name or q.param2~=p.param2
+                    or q.has_metadata~=false or p.has_metadata~=false or q.protected~=false or p.protected~=false then
+                    return nil,fail('build_failed','arrival connector preservation is incomplete')
+                end
+                exact[key(p)]=nil
+            end
+            for _,p in ipairs(c.transition.surfaces) do
+                if not valid_position(p) or p.y~=c.landing.y then
+                    return nil,fail('build_failed','invalid arrival transition surface')
+                end
+                transition_surfaces[#transition_surfaces+1]=p
+            end
+        end
         if next(exact) then return nil,fail('build_failed','unattributed exact expectation') end
         local dirs={{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1},{0,-1},{1,-1}}
         local heading=patch.heading
@@ -126,6 +157,13 @@ function build.new(plan,ops,done)
                 route_surfaces[k]=p
             end
             prior=edge; heading=h
+        end
+        for _,p in ipairs(transition_surfaces) do
+            local k=p.x..':'..p.z
+            if route_surfaces[k] and route_surfaces[k].y~=p.y then
+                return nil,fail('build_failed','arrival transition conflicts with the road')
+            end
+            route_surfaces[k]=route_surfaces[k] or {x=p.x,y=p.y,z=p.z}
         end
         local function state(p,y)
             local id=p.x..':'..y..':'..p.z

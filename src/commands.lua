@@ -309,6 +309,17 @@ function commands.growth_inspect(r)
             end
         end
     end
+    local a=type(r.world)=="table" and r.world.attachment or nil
+    if type(a)=="table" then
+        lines[#lines+1]=string.format("Attachment: checked %d exit and transition nodes: %d differ or are unreadable (%s). "
+            .."Inspection only compares; the walking path is not re-walked and nothing is promoted or repaired.",
+            a.checked or 0,a.mismatched or 0,a.matches and "matches the intended geometry" or "mismatch")
+        local samples=type(a.samples)=="table" and a.samples or {}
+        for i=1,math.min(#samples,GROW_ITEMS) do
+            local x=samples[i]
+            lines[#lines+1]="Attachment node "..fmt_point(x).." expected "..tostring(x.expected)..": "..tostring(x.reason).."."
+        end
+    end
     local counts,order={},{}
     for _,seg in ipairs(type(r.segments_state)=="table" and r.segments_state or {}) do
         local state=tostring(seg.state)

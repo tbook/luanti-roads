@@ -84,7 +84,11 @@ local function harness(options)
         h.events[#h.events + 1] = 'survey'
         if h.survey_error then return nil, h.survey_error end
         if h.survey_script then return h.survey_script(a, b, owner) end
-        local terrain = terrain_for(rect(a, b)); terrain.owner = owner
+        -- Like the engine's chunk-aligned survey, the surveyed bounds cover whole mapblocks.
+        local r = rect(a, b)
+        if options.aligned_bounds then r = {min_x = math.floor(r.min_x / 16) * 16, max_x = math.floor(r.max_x / 16) * 16 + 15, min_y = -64, max_y = 63,
+            min_z = math.floor(r.min_z / 16) * 16, max_z = math.floor(r.max_z / 16) * 16 + 15} end
+        local terrain = terrain_for(r); terrain.owner = owner
         local job = {state = 'succeeded'}
         function job:status() return {status = self.state, terrain = terrain, metrics = {}} end
         function job:cancel() self.state = 'cancelled' end
@@ -175,7 +179,7 @@ local function harness(options)
             classify = surface.classify, load_area = function() end, world_config = function() return config end,
             survey = h.survey, start_survey = h.start_survey, new_planner = new_planner, compose = compose,
             start_build = h.start_build, save_interval = function() return 5.3 end, towns = options.growth_towns,
-            wrap_terrain = options.growth_towns and function(t) return t end or nil,
+            wrap_terrain = options.growth_towns and (options.wrap_terrain or function(t) return t end) or nil,
             find_operation = function(id) return outward_service and outward_service:operation(id) end,
             log = function(level, message) h.logs[#h.logs + 1] = level..': '..message end}))
         local ops = {jobs = h.jobs, towns = towns, store = h.store, now = function() return h.time end, after = h.after,

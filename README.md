@@ -46,6 +46,9 @@ Server-privileged `/roads_grow` manages growth from a built outward road:
 `adopt <outward-op-id>` records it for growth, and `extend`, `status`, `cancel`,
 `retry`, `retire` or `inspect <road-id>` act on the growth road. Extending or
 retrying may generate terrain and builds one segment; growth is never automatic.
+When the optional Towns mod publishes completed settlements, a cycle steers toward
+a compatible published exit and, once it is in range, can build a verified arrival
+onto it; the road is only reported connected after its walking path is re-checked.
 
 ## Development
 

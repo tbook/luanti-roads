@@ -64,12 +64,15 @@ function plans.compose(terrain, route, config)
     local a,b = request.start,request.goal
     local pa,pb = request.provenance.start,request.provenance.goal
     local growth=request.start_seam~=nil
+    local final_headings
     if growth then
-        if not seam or pa.connector or pb.connector then return fail('invalid_endpoint','invalid growth seam dependencies') end
+        if not seam or pa.connector then return fail('invalid_endpoint','invalid growth seam dependencies') end
         local valid,err,overlay=seam.check_request(raster,request,terrain,config.seam_access,config.seam_has_timer)
         if not valid then return nil,err end
         terrain=overlay
-    elseif request.start_heading~=nil or pa.origin=='growth_seam' then
+        valid,err,final_headings=seam.check_goal_attachment(request)
+        if not valid then return nil,err end
+    elseif request.start_heading~=nil or pa.origin=='growth_seam' or request.goal_attachment~=nil then
         return fail('invalid_endpoint','growth provenance requires a seam')
     end
     local constraints, has_connector
@@ -106,6 +109,9 @@ function plans.compose(terrain, route, config)
     end
     if not same(route.centerline[1], request.start) or not same(route.centerline[#route.centerline], request.goal) then
         return fail('invalid_endpoint', 'route endpoints do not match request')
+    end
+    if final_headings and not final_headings[route.headings[#route.headings]] then
+        return fail('composition_failed','the final heading does not satisfy the goal attachment',copy(route.centerline[#route.centerline]))
     end
     local surfaces, surface_list = {}, {}
     local anchor = route.centerline[1]

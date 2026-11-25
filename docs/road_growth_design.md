@@ -604,8 +604,9 @@ Implemented in `src/growth.lua` (cycle orchestration), with presentation in
   (`town|village|road`, each `nearby(pos, radius, limit)`), `attachments`
   (by kind) and `destination_unavailable(descriptor)` (busy/uncertain approaches
   such as outward reservations; growth claims on `exit:<id>/<approach_id>` are
-  always consulted). `init.lua` installs no provider yet (#51), so production
-  cycles report `scan=disabled` and grow directionally.
+  always consulted). Slice F (#51) installs the completed-Towns
+  provider and resolver in `init.lua`; without `towns_api` production cycles still
+  report `scan=disabled` and grow directionally.
 - `extend` takes the destination snapshot after the job slot is held and before
   any survey or durable intent. An unhealthy installed provider fails the cycle
   closed (`provider_unhealthy`) without consuming the activation.
@@ -644,3 +645,84 @@ Implemented in `src/growth.lua` (cycle orchestration), with presentation in
   target, so fallback would hit the same failure.
 - A blocked cycle's stop carries `attempted` (kind, length, approach, outcome per
   attempt) next to the last concrete error.
+
+## Slice F implementation notes (#51)
+
+Implemented in `src/towns_destinations.lua` (provider, resolver, busy/claimed
+lookup), `src/connectors.lua` (`exit_goal`, `inspect_published_exit`,
+`verify_arrival`, `arrival_headings`), `src/towns_adapter.lua` (`scan`/`nearby`
+limit, `overlay` approaches) and the production wiring in `init.lua`. Interpretations
+of the design above:
+
+- **Descriptors.** `id` is the settlement id, `approach_id` the published exit id
+  (the full exit id is `<id>/<approach_id>`), `position` the exit's first column
+  (the anchor, at the exit's first-row height), `direction` the published outward
+  vector and `revision` a digest of the normalized exit plus its settlement's core
+  and structures, so a change to either makes the descriptor stale. Exits the
+  connector cannot honour (width other than 2 or 4, off-vocabulary profile) are not
+  offered. The adapter honours `limit` (1..32); more settlements than the limit is
+  `truncated`, exactly 32 (towns_api's own maximum) is `possible`. The provider is
+  absent when `towns_api` is not installed (directional growth, `scan` reports it)
+  and fails the cycle closed when it is installed but unhealthy.
+- **Arrival geometry.** The landing is the existing published-exit landing family:
+  natural ground on the start seam's four-node lattice, 1..8 nodes beyond the seam
+  row, outside the destination's core and structures, with the same flat
+  transition and 3x3 cap the outward side builds. The exit is read against the
+  actual world (names, facedirs, support, headroom, daylight, metadata,
+  protection), and the walking heights come from the preserved nodes and
+  `surface_height`, never from a reversed stair orientation. The road must come
+  from the outward side (start at least one lattice edge beyond the landing's row);
+  otherwise the exit is `incompatible_heading`. The final edge must enter the
+  landing heading opposite the outward vector or one 45-degree step to either side.
+  This is a planner constraint (`request.goal_attachment = {version=1, headings=
+  {...}}`, one to three headings): a route that reaches the goal in another heading
+  is not a goal, the composer rejects it, and the builder re-checks it.
+- **Plan v3 with a goal connector.** Plan v3 keeps `seam_version=1`; with a goal
+  connector it also carries `connector_version=1` and `endpoints.goal.connector`
+  (never a start connector). The builder requires the connector's preserved exit
+  nodes to be exact expectations and never written, adds the transition surfaces to
+  the road surfaces it validates, and refuses a plan whose last heading is not
+  allowed. Plain v3, v1 and v2 plans behave as before.
+- **Overlay.** `overlay(rect, source, selected_exit_id, approaches)` takes at most
+  four `{settlement_id, exit_id}` approaches. For a named approach only the seam row
+  (step L) is no longer masked as another exit's structure; steps 0..L-1 stay
+  masked, every Towns exclusion stays masked in full, and no reservation, core or
+  bounding box is subtracted. A seam row or landing inside an exclusion is therefore
+  rejected, and the builder's Towns guard still checks every write.
+- **Availability.** At selection (`destination_unavailable`) and again in the
+  synchronous preflight (`recheck`) the outward store and the persistent growth
+  claims are consulted through `outward:eligibility`: a built (legacy or unadopted)
+  record reserves the whole settlement, a partial, building or
+  interrupted-with-writes record its exit, an unreadable record or claim registry
+  fails closed. A claim held by the same road's pending segment is not a conflict.
+- **Reservation.** A final attachment's `claims` are the full exit id
+  `exit:<settlement>/<exit>`, written in the same registry update as the segment
+  (slice B); they stay `held` after success, `uncertain` after an interruption, and
+  `/roads_outward` rejects the exit from its claim at admission and in its preflight.
+- **After construction.** `verify` re-reads the published exit and walks the finished
+  road in the walking direction against the live world: exact preserved exit nodes,
+  every sampled road and transition node a plain road block with three clear nodes
+  and solid support, steps at most one node on the road and half a node on the
+  transition and exit, the last centerline point at the landing, the last heading in
+  the allowed set. Only then is the road `connected`; otherwise it is
+  `uncertain` (`attachment_unverified`) with the claim kept.
+- **Inspection.** A segment record with a final attachment also stores its exact
+  intended exit and transition nodes (at most 1,024). `inspect` compares them like the
+  seam and reports `Attachment: checked N ...`; it never re-walks, promotes or repairs.
+- **Growth contract additions (E's attachment contract, additive).** A final
+  attachment may supply `endpoint(terrain, {start, heading})` returning
+  `{goal=<endpoint provenance with connector>, headings}` once the terrain is
+  surveyed, and `approaches` for the overlay; without them the plain goal of the
+  fake attachments is used.
+- **Real producer data.** `tests/towns_real_settlements.lua` holds the verbatim
+  published settlements recorded by Towns' own demo (14 exits, widths 2 and 4, flat
+  and graded). Of the nine that can face a road ending heading +x, five attach; four
+  are rejected because a Towns structure rectangle covers part of the landing window
+  or its 3x3 cap (the design only builds the transition outside core and
+  structures). The five east-facing exits are not attempted, and two of those start
+  inside the core. This is a producer/consumer fit question, not a defect: widening
+  it would mean subtracting from exclusions, which this design forbids.
+- **Not covered.** See `tools/growth_trial/README.md` for what the engine trials do
+  and do not cover (the real Towns mod is not loaded; its published data is scripted
+  over really built exit nodes). Existing-road junctions (#52), the village provider
+  (#43) and automatic scheduling (#53) are untouched.

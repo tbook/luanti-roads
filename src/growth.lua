@@ -21,6 +21,8 @@ local MAX_CENTERLINE = 1024
 local MAX_COLUMNS = 50000
 local MAX_SAMPLES = 16            -- mismatches reported by inspect
 local MAX_CLAIMS_PER_CYCLE = 8
+local MAX_APPROACHES = 4
+local MAX_ATTACHMENT_NODES = 1024 -- exact attachment nodes saved for inspection
 local WRITER_WAIT = 180
 local OWNER = "roads:growth"
 -- Errors that prove a builder made no writes. A generic build_failed from the
@@ -167,9 +169,9 @@ function growth.new(ops)
     end
 
     ------------------------------------------------------------ seam checks
-    local function patch_bounds(patch)
+    local function list_bounds(list)
         local minp, maxp
-        for _, p in ipairs(patch.preserved) do
+        for _, p in ipairs(list) do
             minp = minp or {x = p.x, y = p.y, z = p.z}; maxp = maxp or {x = p.x, y = p.y, z = p.z}
             for _, axis in ipairs({"x", "y", "z"}) do
                 minp[axis] = math.min(minp[axis], p[axis]); maxp[axis] = math.max(maxp[axis], p[axis])
@@ -177,6 +179,7 @@ function growth.new(ops)
         end
         return minp, maxp
     end
+    local function patch_bounds(patch) return list_bounds(patch.preserved) end
     -- Existing mapblocks only: load_area never generates terrain.
     local function check_seam(patch, owner)
         local valid, why = seam.validate(raster, patch)
@@ -229,6 +232,30 @@ function growth.new(ops)
                 has_metadata = meta, protected = protected, has_timer = timer}
         end
         return snapshot
+    end
+
+    -- The exact intended final nodes of a final attachment, saved with the
+    -- segment so that inspection after an interruption can compare them: the
+    -- preserved exit nodes (as read before the writes) and the transition's
+    -- road blocks with their clearance. Bounded; an attachment that does not fit
+    -- is rejected before any write.
+    local function attachment_nodes(plan)
+        local connector = plan.endpoints and plan.endpoints.goal and plan.endpoints.goal.connector
+        if type(connector) ~= "table" then return nil end
+        local nodes = {}
+        local function add(p, name, param2)
+            nodes[#nodes + 1] = {x = p.x, y = p.y, z = p.z, name = name, param2 = param2}
+        end
+        for _, p in ipairs(connector.preserved or {}) do add(p, p.name, p.param2) end
+        for _, p in ipairs(connector.transition and connector.transition.surfaces or {}) do
+            add(p, "mcl_core:cobble", 0)
+            for dy = 1, 3 do add({x = p.x, y = p.y + dy, z = p.z}, "air", 0) end
+        end
+        if #nodes > MAX_ATTACHMENT_NODES then
+            return nil, error_result("storage_budget", "the attachment has " .. #nodes .. " exact nodes (limit "
+                .. MAX_ATTACHMENT_NODES .. ")", {limit = MAX_ATTACHMENT_NODES, observed = #nodes})
+        end
+        return {kind = "published_exit", landing = copy(connector.landing), exit = copy(connector.exit), nodes = nodes}
     end
 
     local hooks = {}
@@ -712,10 +739,13 @@ function growth.new(ops)
         if type(plan) ~= "table" or plan.version ~= 3 or type(plan.centerline) ~= "table" or #plan.centerline < 3 then
             return attempt_failed(act, error_result("segment_too_short", "a continuation needs at least two edges to carry a seam"))
         end
-        local list, lerr = columns_of(plan.centerline)
-        if not list then return attempt_failed(act, lerr) end
+        local list, extra = source_surfaces(plan)
+        if not list then return attempt_failed(act, extra) end
         local summary, ferr = footprint_summary(list)
         if not summary then return attempt_failed(act, ferr) end
+        if #extra > 0 then summary.extra = extra end
+        local arrival, arrival_err = attachment_nodes(plan)
+        if arrival_err then return attempt_failed(act, arrival_err) end
         local ids, cerr = store:collect(summary.bounds)
         if not ids then return finish_zero(act, cerr) end
         local mask, merr = obstacle_mask(ids, summary.bounds, seam_columns(act.patch))
@@ -746,7 +776,7 @@ function growth.new(ops)
             destination = act.attempt.kind == "destination" and {kind = act.attempt.descriptor.kind,
                 id = act.attempt.descriptor.id, approach_id = act.attempt.approach_id, mode = act.attempt.mode,
                 revision = act.attempt.descriptor.revision, position = copy(act.attempt.descriptor.position)} or nil,
-            attempts = copy(act.log), aggregate = copy(act.agg),
+            attachment = arrival, attempts = copy(act.log), aggregate = copy(act.agg),
             writes = #plan.writes, state = "prepared", created_at = store:now()}
         local bytes, save_err = store:save_record(record)
         if not bytes then return finish_zero(act, save_err) end
@@ -829,7 +859,10 @@ function growth.new(ops)
                     return later(act, proceed, 1)
                 end
                 local b = terrain.bounds
-                local rects, why = ops.towns:overlay({x1 = b.min_x, z1 = b.min_z, x2 = b.max_x, z2 = b.max_z})
+                -- Only the selected destination's exact exit rows are named; every
+                -- exclusion stays masked.
+                local rects, why = ops.towns:overlay({x1 = b.min_x, z1 = b.min_z, x2 = b.max_x, z2 = b.max_z}, nil, nil,
+                    act.attachment and act.attachment.approaches or nil)
                 if not rects then return attempt_failed(act, why) end
                 wrapped = ops.wrap_terrain(terrain, rects)
             end
@@ -837,17 +870,41 @@ function growth.new(ops)
             act.terrain = wrapped
             set_stage(act, "resolving")
             local start = act.patch.endpoint
-            local goal_x, goal_z = act.attempt.target.x, act.attempt.target.z
-            local ok, col = pcall(wrapped.get_column, goal_x, goal_z)
-            if not ok or type(col) ~= "table" or col.status ~= "ok" or not integer(col.ground_y) then
-                return attempt_failed(act, error_result("invalid_endpoint", "the forward target is not known natural ground",
-                    {position = {x = goal_x, z = goal_z}}))
+            local request
+            local att = act.attachment
+            if act.attempt.mode == "final" and att and type(att.endpoint) == "function" then
+                -- The provider resolves its own goal (a landing and connector) from the
+                -- surveyed terrain; a refusal falls back with zero writes.
+                local called, arrival, arrival_err = pcall(att.endpoint, att, wrapped,
+                    {start = copy(start), heading = act.patch.heading})
+                if not called then
+                    return attempt_failed(act, error_result("attachment_failed", "the attachment provider raised an error: " .. tostring(arrival)))
+                end
+                if type(arrival) ~= "table" or type(arrival.goal) ~= "table" or type(arrival.headings) ~= "table"
+                    or type(arrival.goal.resolved) ~= "table" then
+                    return attempt_failed(act, error_result(type(arrival_err) == "table" and arrival_err.code or "attachment_rejected",
+                        type(arrival_err) == "table" and arrival_err.reason or "the destination arrival was rejected",
+                        {position = type(arrival_err) == "table" and copy(arrival_err.position) or nil}))
+                end
+                local goal = copy(arrival.goal.resolved)
+                request = {start = copy(start), goal = goal, start_heading = act.patch.heading, start_seam = copy(act.patch),
+                    goal_attachment = {version = 1, headings = copy(arrival.headings)},
+                    provenance = {start = {origin = "growth_seam", requested = {x = start.x, y = start.y + 0.5, z = start.z},
+                            ground = copy(start), resolved = copy(start)},
+                        goal = copy(arrival.goal)}}
+            else
+                local goal_x, goal_z = act.attempt.target.x, act.attempt.target.z
+                local ok, col = pcall(wrapped.get_column, goal_x, goal_z)
+                if not ok or type(col) ~= "table" or col.status ~= "ok" or not integer(col.ground_y) then
+                    return attempt_failed(act, error_result("invalid_endpoint", "the forward target is not known natural ground",
+                        {position = {x = goal_x, z = goal_z}}))
+                end
+                local goal = {x = goal_x, y = col.ground_y, z = goal_z}
+                request = {start = copy(start), goal = goal, start_heading = act.patch.heading, start_seam = copy(act.patch),
+                    provenance = {start = {origin = "growth_seam", requested = {x = start.x, y = start.y + 0.5, z = start.z},
+                            ground = copy(start), resolved = copy(start)},
+                        goal = {requested = {x = goal.x, y = goal.y + 0.5, z = goal.z}, ground = copy(goal), resolved = copy(goal)}}}
             end
-            local goal = {x = goal_x, y = col.ground_y, z = goal_z}
-            local request = {start = copy(start), goal = goal, start_heading = act.patch.heading, start_seam = copy(act.patch),
-                provenance = {start = {origin = "growth_seam", requested = {x = start.x, y = start.y + 0.5, z = start.z},
-                        ground = copy(start), resolved = copy(start)},
-                    goal = {requested = {x = goal.x, y = goal.y + 0.5, z = goal.z}, ground = copy(goal), resolved = copy(goal)}}}
             local planner_config = {weights = act.config.planner.weights, road_material = act.config.planner.road_material,
                 max_expansions = act.allowance, seam_access = access, seam_has_timer = ops.has_timer}
             local made, search, serr = pcall(ops.new_planner, wrapped, request, planner_config)
@@ -923,6 +980,19 @@ function growth.new(ops)
                 claims[#claims + 1] = {id = claim.id, kind = claim.kind, side = claim.side or "destination"}
             end
             for _, claim in ipairs(claims) do act.claims[#act.claims + 1] = claim end
+        end
+        if resolved.approaches ~= nil then
+            local list = {}
+            if type(resolved.approaches) ~= "table" or #resolved.approaches > MAX_APPROACHES then
+                return nil, error_result("attachment_invalid", "the attachment names too many approaches")
+            end
+            for _, a2 in ipairs(resolved.approaches) do
+                if type(a2) ~= "table" or type(a2.settlement_id) ~= "string" or type(a2.exit_id) ~= "string" then
+                    return nil, error_result("attachment_invalid", "the attachment names an invalid approach")
+                end
+                list[#list + 1] = {settlement_id = a2.settlement_id, exit_id = a2.exit_id}
+            end
+            resolved.approaches = list
         end
         act.attachment = resolved
         return true
@@ -1181,11 +1251,11 @@ function growth.new(ops)
     ------------------------------------------------------------ inspect
     -- Compare intended seam nodes with the loaded world. Read-only: existing
     -- mapblocks may be loaded, nothing is generated, promoted or repaired.
-    local function compare_patch(patch)
-        local minp, maxp = patch_bounds(patch)
+    local function compare_list(list)
+        local minp, maxp = list_bounds(list)
         local loaded, result = pcall(ops.load_area, minp, maxp)
-        local report = {checked = #patch.preserved, mismatched = 0, samples = {}, loaded = loaded and result ~= false}
-        for _, p in ipairs(patch.preserved) do
+        local report = {checked = #list, mismatched = 0, samples = {}, loaded = loaded and result ~= false}
+        for _, p in ipairs(list) do
             local reason
             local g_ok, node = pcall(access.get_node, p)
             if not g_ok or type(node) ~= "table" or node.name ~= p.name or node.param2 ~= p.param2 then
@@ -1205,6 +1275,7 @@ function growth.new(ops)
         report.matches = report.mismatched == 0
         return report
     end
+    local function compare_patch(patch) return compare_list(patch.preserved) end
 
     function self:inspect(road_id, actor)
         local ok, why = disabled(); if not ok then return nil, why end
@@ -1235,6 +1306,15 @@ function growth.new(ops)
             report.world.status = cmp.matches and "matches_intended" or "mismatch"
         else
             report.world.status = "intended_seam_invalid"
+        end
+        -- A final attachment also saved the exact exit and transition nodes it relies on.
+        local attached = record.attachment
+        if type(attached) == "table" and type(attached.nodes) == "table" and #attached.nodes > 0
+            and #attached.nodes <= MAX_ATTACHMENT_NODES then
+            local cmp = compare_list(attached.nodes)
+            cmp.landing = copy(attached.landing)
+            report.world.attachment = cmp
+            if not cmp.matches then report.world.status = "mismatch" end
         end
         report.note = "Inspection never promotes, repairs or replays work."
         return report
