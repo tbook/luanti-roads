@@ -245,7 +245,7 @@ local function automatic_lines(s,auto)
     if auto.enabled then
         lines[#lines+1]="Automatic growth is enabled: an approach within 24 nodes of an open endpoint queues one extension."
     else
-        lines[#lines+1]="Automatic growth is disabled (roads_growth_automatic is off); only extend and retry grow this road."
+        lines[#lines+1]="Automatic growth is disabled (roads_growth_automatic is false); only extend and retry grow this road."
     end
     local q=type(auto.queued)=="table" and auto.queued or nil
     if q then
@@ -487,7 +487,7 @@ function commands.register(engine,controller,surface,world_config,preview_render
             return text.." "..commands.growth_summary(s,automatic(road_id))
         end
         engine.register_chatcommand("roads_grow",{params="adopt <outward-op-id> | extend|status|cancel|retry|retire|inspect <road-id>",
-            description="Adopt a built outward road for growth, or extend, inspect, cancel, retry or retire a growth road. Extending or retrying may generate terrain and builds one segment. Growth is automatic only when the roads_growth_automatic setting is on; extend and retry are always explicit.",
+            description="Adopt a built outward road for growth, or extend, inspect, cancel, retry or retire a growth road. Extending or retrying may generate terrain and builds one segment. Growth is automatic near players unless the roads_growth_automatic setting is false; extend and retry are always explicit.",
             privs={server=true},
             func=function(name,param)
                 local words={}

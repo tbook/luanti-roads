@@ -825,7 +825,7 @@ Lua 5.1, with the real growth service in its last tests. Interpretations of the 
   Nothing is written for queued, refused or expired entries.
 - **Session only.** Arming, the window and the queue are memory only. A restart starts empty:
   the first sample of a player is an observation, and an open endpoint needs a new approach.
-- **Automatic switch.** `roads_growth_automatic` (default `false`) is read in `init.lua`. Only
+- **Automatic switch.** `roads_growth_automatic` (default `true`, changed from `false` at the product owner's direction after #53 merged) is read in `init.lua`. Only
   when it is true is a globalstep registered. The scheduler object always exists so that
   `/roads_grow status` can explain the state. No `settingtypes.txt` entry was added.
 - **Status.** `/roads_grow status <road>` and the other summaries add: whether automatic growth

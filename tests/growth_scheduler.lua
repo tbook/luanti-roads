@@ -567,7 +567,7 @@ end
 test('status text explains disabled automatic growth, queued waiting, arming and blocked endpoints', function()
     local disabled = commands.growth_summary(road_summary('open', 'needs_departure'),
         {enabled = false, slot_busy = false, queue = {length = 0, max = 16}, armed = 0, eligible = true})
-    assert(disabled:find('Automatic growth is disabled (roads_growth_automatic is off)', 1, true), disabled)
+    assert(disabled:find('Automatic growth is disabled (roads_growth_automatic is false)', 1, true), disabled)
     assert(disabled:find('Waiting for a player', 1, true) == nil, 'disabled never claims to wait for a player')
     local queued = commands.growth_summary(road_summary('open', 'needs_departure'),
         {enabled = true, slot_busy = true, queued = {position = 2, of = 3, age = 4, expires_in = 26, players = 1},

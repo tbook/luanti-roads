@@ -105,7 +105,7 @@ do
         deserialize=function(text) return core.deserialize(text,true) end,
         now=os.time})
     -- Growth lifecycle. /roads_grow drives it. Automatic growth (player proximity,
-    -- src/growth_scheduler.lua) is off unless the roads_growth_automatic setting is true. Completed
+    -- src/growth_scheduler.lua) is on unless the roads_growth_automatic setting is false. Completed
     -- Towns settlements are the only destination provider: the provider is absent
     -- (cycles scan nothing and grow directionally) unless towns_api is installed,
     -- and an installed but unhealthy Towns fails a cycle closed. The outward
@@ -147,7 +147,7 @@ do
     if not growth_service then error("[roads] cannot initialize growth service: "..tostring(growth_error.reason)) end
     -- Proximity activation (#53). Disabled by default: with the setting off there is
     -- no globalstep and nothing calls extend automatically. Commands are unaffected.
-    local automatic=core.settings:get_bool("roads_growth_automatic",false)==true
+    local automatic=core.settings:get_bool("roads_growth_automatic",true)==true
     local proximity,proximity_error=growth_scheduler.new({enabled=automatic,now=now,
         connected=function()
             local names={}
