@@ -216,8 +216,19 @@ function scheduler.new(ops)
         local vertical_ok = math.abs(pos.y - e.y) <= VERTICAL
         local arm = slot.arm[e.road_id]
         if not vertical_ok or horizontal2 > OUTER * OUTER then
-            if not arm and count(slot.arm) >= MAX_ROADS then return end
-            slot.arm[e.road_id] = {revision = e.revision}
+            -- At the cap, the least recently observed outside arming for another road
+            -- makes room. Dropping history never grants a token; this road still needs
+            -- its own outside observation and then a crossing.
+            if not arm and count(slot.arm) >= MAX_ROADS then
+                local oldest, oldest_id = nil, nil
+                for road_id, other in pairs(slot.arm) do
+                    if oldest == nil or other.at < oldest.at or (other.at == oldest.at and road_id < oldest_id) then
+                        oldest, oldest_id = other, road_id
+                    end
+                end
+                slot.arm[oldest_id] = nil
+            end
+            slot.arm[e.road_id] = {revision = e.revision, at = self.ticks}
         elseif horizontal2 <= INNER * INNER and arm and arm.revision == e.revision then
             slot.arm[e.road_id] = nil
             enqueue(name, e, now)

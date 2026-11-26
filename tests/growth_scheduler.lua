@@ -384,6 +384,115 @@ test('per-tick work is bounded by 32 samples and 64 comparisons, with comparison
     for i = 1, 40 do assert((w.seen[string.format('q%02d', i)] or 0) > 0, 'q'..i..' sampled') end
 end)
 
+local function size(t) local n = 0; for _ in pairs(t) do n = n + 1 end; return n end
+
+test('the 128-road arming cap evicts the least recently observed arming instead of locking a player out', function()
+    local w = world()
+    local s = w.sched()
+    for k = 1, 130 do w.add_road(string.format('growth:v1:r%03d', k), {x = 10, y = 40 * k, z = 10}) end
+    w.at('p', 10, 10, 0)                         -- every road is 40 or more nodes above: outside each
+    local ever = {}
+    for _ = 1, 8 do
+        w.tick(s)
+        for id in pairs(s.slots.p.arm) do ever[id] = true end
+        assert(size(s.slots.p.arm) <= 128, 'arming is capped at 128 roads')
+    end
+    assert(size(ever) == 130, 'every road was armed in turn, not only the first 128; got '..size(ever))
+    assert(size(s.slots.p.arm) == 128)
+    -- A road that is not currently armed gets no token from a crossing alone.
+    local unarmed
+    for k = 1, 130 do
+        if s.slots.p.arm[string.format('growth:v1:r%03d', k)] == nil then unarmed = k; break end
+    end
+    assert(unarmed, 'one road was evicted')
+    w.at('p', 10, 10, 40 * unarmed)              -- inside that road's vertical band and radius
+    w.tick(s)
+    assert(#w.calls == 0, 'an evicted road needs a fresh outside observation before it can activate')
+end)
+
+test('vertical tolerance: 16 nodes is inside and 17 is outside, and vertical separation arms', function()
+    local w = world()
+    local s = w.sched()
+    w.add_road(A, {x = 0, z = 0})
+    w.at('up', 10, 0, 17); w.tick(s)             -- 17 vertically away: outside, arms
+    assert(s.slots.up.arm[A] ~= nil)
+    w.at('up', 10, 0, 16); w.tick(s)             -- exactly 16: inside, the token
+    assert(#w.calls == 1, 'dy=16 is inside')
+    local w2 = world()
+    local s2 = w2.sched()
+    w2.add_road(A, {x = 0, z = 0})
+    w2.at('edge', 10, 0, 17)
+    for _ = 1, 3 do w2.tick(s2) end              -- stays at dy=17: never inside
+    assert(#w2.calls == 0 and s2.slots.edge.arm[A] ~= nil, 'dy=17 never supplies a token')
+    w2.at('edge', 10, 0, 16); w2.tick(s2)
+    assert(#w2.calls == 1, 'dropping to dy=16 is the approach')
+end)
+
+test('128-node cells: neighbouring cells across zero and into negative coordinates are compared; two cells away are not', function()
+    -- Endpoint 130 (cell 1), player 127 (cell 0).
+    local w = world()
+    local s = w.sched()
+    w.add_road(A, {x = 130, z = 0})
+    w.at('p', 60, 0); w.tick(s)                  -- 70 out, across the cell boundary: armed
+    assert(s.slots.p.arm[A] ~= nil)
+    w.at('p', 127, 0); w.tick(s)                 -- 3 from the endpoint: token
+    assert(#w.calls == 1)
+    -- Endpoint -1 (cell -1), player 60 (cell 0) and 20.
+    local w2 = world()
+    local s2 = w2.sched()
+    w2.add_road(A, {x = -1, z = 0})
+    w2.at('p', 60, 0); w2.tick(s2)               -- 61 out (cell 0 sees cell -1)
+    w2.at('p', 20, 0); w2.tick(s2)               -- 21 in
+    assert(#w2.calls == 1, 'negative cell neighbours are compared')
+    -- Endpoint -1 (cell -1), player -130 (cell -2), then -60 and -20.
+    local w3 = world()
+    local s3 = w3.sched()
+    w3.add_road(A, {x = -1, z = 0})
+    w3.at('p', -130, 0); w3.tick(s3)
+    w3.at('p', -60, 0); w3.tick(s3)
+    w3.at('p', -20, 0); w3.tick(s3)
+    assert(#w3.calls == 1, 'a player in the cell below zero approaches across the boundary')
+    -- The same across the z boundary, both above and below zero.
+    local w5 = world()
+    local s5 = w5.sched()
+    w5.add_road(A, {x = 0, z = 130})
+    w5.at('p', 0, 60); w5.tick(s5)
+    w5.at('p', 0, 127); w5.tick(s5)
+    assert(#w5.calls == 1, 'z neighbours above zero are compared')
+    local w6 = world()
+    local s6 = w6.sched()
+    w6.add_road(A, {x = 0, z = -1})
+    w6.at('p', 0, 60); w6.tick(s6)
+    w6.at('p', 0, 20); w6.tick(s6)
+    assert(#w6.calls == 1, 'z neighbours below zero are compared')
+    -- Endpoint 400 (cell 3); player at 0 (cell 0) is two cells away and is not compared.
+    local w4 = world()
+    local s4 = w4.sched()
+    w4.add_road(A, {x = 400, z = 0})
+    w4.at('p', 0, 0); w4.tick(s4)
+    assert(s4.slots.p.arm[A] == nil, 'a player two cells away is not compared')
+    w4.at('p', 290, 0); w4.tick(s4)              -- cell 2 is a neighbour: outside, armed
+    assert(s4.slots.p.arm[A] ~= nil)
+    w4.at('p', 330, 0); w4.tick(s4)
+    w4.at('p', 390, 0); w4.tick(s4)
+    assert(#w4.calls == 1)
+end)
+
+test('teleport guard: a jump of more than 72 nodes between samples is never an approach; 72 still counts', function()
+    local w = world()
+    local s = w.sched()
+    w.add_road(A, {x = 0, z = 0})
+    w.at('t', -90, 0); w.tick(s)                 -- armed
+    w.at('t', 10, 0); w.tick(s)                  -- jump of 100: a teleport, no token
+    assert(#w.calls == 0)
+    local w2 = world()
+    local s2 = w2.sched()
+    w2.add_road(A, {x = 0, z = 0})
+    w2.at('m', -62, 0); w2.tick(s2)              -- armed
+    w2.at('m', 10, 0); w2.tick(s2)               -- jump of exactly 72: still an approach (documented)
+    assert(#w2.calls == 1)
+end)
+
 test('step runs one sampling tick per second when enabled and nothing when disabled', function()
     local w = world()
     local off = w.sched({enabled = false})

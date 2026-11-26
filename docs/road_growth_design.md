@@ -813,6 +813,9 @@ Lua 5.1, with the real growth service in its last tests. Interpretations of the 
   into that list, and the starting player rotates by tick.
 - **Arming bound.** At most 128 armed endpoints per player slot. Arming holds only the revision
   it was observed on; a new revision, a road that is no longer open, or an evicted slot drops it.
+  At the cap, a new outside observation evicts that player's least recently observed arming for
+  another road. Eviction loses history only: the new road still needs its own outside observation
+  and then a crossing, and no token is ever restored.
 - **Queue (`scheduler.queue`, reusable for #42).** Keys are `road_id#revision`, at most 16
   unique, FIFO, expiring at queued time plus 30 seconds, never renewed. A repeat from a player
   already in the queue, or a second player for the same key, coalesces. Admission requires that
