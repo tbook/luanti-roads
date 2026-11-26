@@ -50,12 +50,11 @@ When the optional Towns mod publishes completed settlements, a cycle steers towa
 a compatible published exit and, once it is in range, can build a verified arrival
 onto it; the road is only reported connected after its walking path is re-checked.
 
-### Automatic growth (disabled by default)
+### Automatic growth (enabled by default)
 
-Setting `roads_growth_automatic` (boolean, default `false`) lets a growth road
-extend by itself when a player approaches its open endpoint. It is off by
-default, and it stays off until the engine evidence for automatic writes is
-reviewed; enable it only in a disposable world. With the setting off there is
+Setting `roads_growth_automatic` (boolean, default `true`) lets a growth road
+extend by itself when a player approaches its open endpoint. Set it to `false`
+to disable. With the setting off there is
 no sampling and nothing calls `extend` automatically; `/roads_grow` is unchanged.
 
 When on, the server samples connected players about once per second. A player
