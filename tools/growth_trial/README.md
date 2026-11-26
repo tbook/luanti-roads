@@ -79,5 +79,24 @@ directory. `--world DIR --phase 2` repeats the restart check on a kept world.
 interruption conversion) in pure Lua; it does not exercise the engine, mod
 storage durability or shutdown timing.
 
+## Junction scenario (`--scenario junction`, run by default after `growth`)
+
+A second disposable world (`roads_trial_scenario = junction`, same two launches and
+`--interrupt` choice) with four fresh seeded roads built by the real outward service and
+adopted, and the registered-road provider as the only destination provider: A runs east
+along z = 0 (x 208..248); B comes from the south (x 228) and T-joins A; C comes from the
+east and joins A's open endpoint end to end; D comes from the north (x 216) and is the
+cut-off cycle. Phase 1 checks after each join: states and `connected.junction`, the
+target road byte for byte unchanged, the exact 7-node claim interval, `inspect`
+(`matches_intended`, attachment geometry), and an independent breadth-first walk over the
+real nodes that reaches every branch (new road start and end, both ends of A, the other
+joined roads). Phase 2 restarts: finished junctions and held claims are unchanged, nothing
+is replayed, and `planning` mode requires `retry` to build D's T (claims held, walked);
+`build` mode requires D `uncertain` with all claims `uncertain`, `extend`/`retry` refused,
+`inspect` matching the written geometry (`Attachment: checked`), the written path walkable,
+D never promoted, and `retire` keeping every claim. Markers: `GROWTH_TRIAL_T_JUNCTION`,
+`GROWTH_TRIAL_END_JUNCTION`, `GROWTH_TRIAL_RESTART`, then `GROWTH_TRIAL_JUNCTION_RETRY` or
+`GROWTH_TRIAL_JUNCTION_INSPECT`.
+
 Not verified: player traversal, restart after a hard crash, partial writes
 inside one builder tick, or the real Towns API.

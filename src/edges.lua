@@ -189,7 +189,8 @@ function edges.connector_constraints(provenance)
             end
             if type(c.direction)~='table' or not finite(c.direction.x) or not finite(c.direction.z)
                 or math.abs(c.direction.x)+math.abs(c.direction.z)~=1
-                or (c.width~=2 and c.width~=4) or type(c.path)~='table' or #c.path==0 or #c.path>32 then
+                or not (c.width==2 or c.width==4 or (c.width==3 and type(c.exit)=='table' and c.exit.kind=='road'))
+                or type(c.path)~='table' or #c.path==0 or #c.path>32 then
                 return nil, 'invalid connector walking path'
             end
             for i,p in ipairs(c.path) do

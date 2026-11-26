@@ -661,9 +661,18 @@ function growth.new(ops)
             road.last_segment_id = sid; road.state = "open"; road.pending = nil; road.stop = nil
             road.activation = "needs_departure"
             if result == "connected" then
-                local d = attempt.descriptor
+                local dest = attempt.descriptor
                 road.state = "connected"
-                road.connected = {kind = d.kind, id = d.id, approach_id = d.approach_id, revision = d.revision, segment_id = sid}
+                road.connected = {kind = dest.kind, id = dest.id, approach_id = dest.approach_id, revision = dest.revision, segment_id = sid,
+                    junction = act.joined and act.joined.junction or nil}
+                -- An end-to-end road join ends both unfinished endpoints in the same
+                -- registry update. A T join leaves the target road as it was.
+                local j = act.joined
+                local target = j and j.junction == "end" and d.roads[j.road_id] or nil
+                if target and target.revision == j.revision and (target.state == "open" or target.state == "stopped") then
+                    target.state = "connected"; target.stop = nil
+                    target.connected = {kind = "road", id = act.road_id, approach_id = sid, segment_id = sid, junction = "end"}
+                end
             end
             push_attempt(road, act, "built", nil, result)
             return true
@@ -846,6 +855,25 @@ function growth.new(ops)
         attempt_failed(act, err)
     end
 
+    -- Validated destination-side claims of an attachment; `held` claims are
+    -- already counted against the per-cycle cap.
+    local function claim_list(list, held)
+        local claims = {}
+        for _, claim in ipairs(list or {}) do
+            if type(claim) ~= "table" or type(claim.id) ~= "string" or claim.id == "" or #claim.id > 256
+                or type(claim.kind) ~= "string" then
+                return nil, error_result("attachment_rejected", "the attachment claims are invalid")
+            end
+            if held + #claims >= MAX_CLAIMS_PER_CYCLE then
+                return nil, error_result("attachment_rejected", "the attachment needs " .. #list .. " claims on top of " .. held
+                    .. " already held in this cycle; the cap is " .. MAX_CLAIMS_PER_CYCLE .. " per cycle",
+                    {limit = MAX_CLAIMS_PER_CYCLE, observed = held + #list})
+            end
+            claims[#claims + 1] = {id = claim.id, kind = claim.kind, side = claim.side or "destination"}
+        end
+        return claims
+    end
+
     local function resolve_and_search(act, terrain)
         set_stage(act, "waiting_towns")
         local waited_from = ops.now()
@@ -885,6 +913,20 @@ function growth.new(ops)
                     return attempt_failed(act, error_result(type(arrival_err) == "table" and arrival_err.code or "attachment_rejected",
                         type(arrival_err) == "table" and arrival_err.reason or "the destination arrival was rejected",
                         {position = type(arrival_err) == "table" and copy(arrival_err.position) or nil}))
+                end
+                -- A provider that only learns its exact join once the terrain is
+                -- surveyed (a road junction) names its claims and the road it
+                -- joins here; they are reserved with the segment like any other.
+                local more, why_claims = claim_list(arrival.claims, #act.claims)
+                if not more then return attempt_failed(act, why_claims) end
+                for _, claim in ipairs(more) do act.claims[#act.claims + 1] = claim end
+                if arrival.joined ~= nil then
+                    local j = arrival.joined
+                    if type(j) ~= "table" or type(j.road_id) ~= "string" or type(j.revision) ~= "number"
+                        or (j.junction ~= "end" and j.junction ~= "t") then
+                        return attempt_failed(act, error_result("attachment_invalid", "the attachment names an invalid joined road"))
+                    end
+                    act.joined = {road_id = j.road_id, revision = j.revision, junction = j.junction}
                 end
                 local goal = copy(arrival.goal.resolved)
                 request = {start = copy(start), goal = goal, start_heading = act.patch.heading, start_seam = copy(act.patch),
@@ -971,14 +1013,8 @@ function growth.new(ops)
                 return nil, error_result("attachment_rejected", "the attachment has no valid goal")
             end
             a.target = {x = g.x, z = g.z}
-            local claims = {}
-            for _, claim in ipairs(resolved.claims or {}) do
-                if #claims >= MAX_CLAIMS_PER_CYCLE or type(claim) ~= "table" or type(claim.id) ~= "string" or claim.id == ""
-                    or #claim.id > 256 or type(claim.kind) ~= "string" then
-                    return nil, error_result("attachment_rejected", "the attachment claims are invalid")
-                end
-                claims[#claims + 1] = {id = claim.id, kind = claim.kind, side = claim.side or "destination"}
-            end
+            local claims, claims_err = claim_list(resolved.claims, #act.claims)
+            if not claims then return nil, claims_err end
             for _, claim in ipairs(claims) do act.claims[#act.claims + 1] = claim end
         end
         if resolved.approaches ~= nil then
@@ -1014,7 +1050,7 @@ function growth.new(ops)
     next_attempt = function(act)
         act.index = act.index + 1
         act.attempt_chunks, act.attempt_expansions = 0, 0
-        act.attachment = nil
+        act.attachment, act.joined = nil, nil
         act.claims = copy(act.base_claims)
         local a = act.list[act.index]
         act.attempt = a
@@ -1116,6 +1152,12 @@ function growth.new(ops)
         if not road then return nil, error_result("unknown_road", "no growth road " .. tostring(road_id)) end
         if road.state ~= "open" then
             return nil, error_result("not_extendable", EXTENDABLE[road.state] or "the road is not open", {state = road.state})
+        end
+        -- An end-to-end join reserves this very endpoint (also when interrupted).
+        local joined = store:claim("endjoin:" .. road_id)
+        if joined then
+            return nil, error_result("not_extendable", "an end-to-end road join by " .. tostring(joined.road_id)
+                .. " claims this endpoint (" .. tostring(joined.state) .. ")", {state = road.state, claim = "endjoin:" .. road_id})
         end
         local claims = {}
         for _, claim in ipairs(options and options.claims or {}) do
@@ -1282,7 +1324,7 @@ function growth.new(ops)
         local road = store:road(road_id)
         if not road then return nil, error_result("unknown_road", "no growth road " .. tostring(road_id)) end
         local report = summarize(road_id, road)
-        report.claims = {}
+        report.claims, report.claims_total = store:claims_of(road_id, 16)
         local ids = store:entry_ids()
         for _, sid in ipairs(road.segments) do
             local e = store:entry(sid)

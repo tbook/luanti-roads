@@ -370,7 +370,8 @@ local function valid_descriptor(desc)
     local o=desc.offsets
     if not integral(o.min) or not integral(o.max) or o.min>0 or o.max<0 then return false end
     local width=o.max-o.min+1
-    if width~=2 and width~=4 then return false end
+    -- A road junction (kind 'road') is as wide as the roads themselves.
+    if width~=2 and width~=4 and not (width==3 and desc.kind=='road') then return false end
     if not integral(desc.length) or desc.length<1 or desc.length>16 or #desc.profile~=desc.length then return false end
     for _,entry in ipairs(desc.profile) do
         if type(entry)~='table' or not integral(entry.y) or type(entry.name)~='string'
@@ -463,7 +464,10 @@ end
 
 -- The arrival side of a published exit for a growth road ending at `start`
 -- (a seam endpoint {x,y,z}): inspect the built exit, choose a natural landing
--- on the start's four-node lattice outside the destination footprint, build the
+-- on the start's four-node lattice outside the destination footprint (only when
+-- desc.footprint rects exist, as for Towns exits; a road join, desc.kind 'road',
+-- has none, and relies on its full-width preserved patch and on road nodes not
+-- being natural ground for the terrain), build the
 -- same transition and landing cap the outward side uses, and require that the
 -- final edge can enter the landing heading into the town (opposite the
 -- published outward vector, at most one 45-degree final bend). Returns
@@ -489,7 +493,7 @@ function connectors.exit_goal(terrain,desc,start,access,load,surface,edges)
     if not c then return fail(why,where) end
     local feet={x=desc.anchor.x,y=c.path[2].y,z=desc.anchor.z}
     local origin={origin='published_exit',offsets={min=c.min,max=c.max},
-        exit={api_version=desc.api_version,settlement_id=desc.settlement_id,exit_id=desc.exit_id,source=desc.source}}
+        exit={api_version=desc.api_version,settlement_id=desc.settlement_id,exit_id=desc.exit_id,source=desc.source,kind=desc.kind}}
     local headings=connectors.arrival_headings(desc.direction)
     local options=landing_options(terrain,c,start)
     if #options==0 then return fail('no lattice-compatible natural connector landing',c.selection) end

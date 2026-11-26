@@ -281,7 +281,8 @@ function commands.growth_summary(s)
         if #attempted>0 then lines[#lines+1]="Attempted: "..table.concat(attempted,"; ").."." end
     end
     if s.connected then
-        lines[#lines+1]=string.format("Connected to %s %s (approach %s).",tostring(s.connected.kind),tostring(s.connected.id),tostring(s.connected.approach_id))
+        local how=s.connected.junction=="t" and " by a T junction" or s.connected.junction=="end" and " end to end" or ""
+        lines[#lines+1]=string.format("Connected to %s %s%s (approach %s).",tostring(s.connected.kind),tostring(s.connected.id),how,tostring(s.connected.approach_id))
     end
     if s.retired then lines[#lines+1]=string.format("Retired by %s; was %s.",tostring(s.retired.by),tostring(s.retired.was)) end
     if s.explanation then lines[#lines+1]=s.explanation end
@@ -330,6 +331,20 @@ function commands.growth_inspect(r)
     local parts={}
     for _,state in ipairs(order) do parts[#parts+1]=counts[state].." "..state end
     if #parts>0 then lines[#lines+1]="Segments by state: "..table.concat(parts,", ").."." end
+    -- Reservations of this road: exit, endpoint and road-join interval claims.
+    local claim_counts,claim_order={}, {}
+    for _,claim in ipairs(type(r.claims)=="table" and r.claims or {}) do
+        local label=tostring(claim.kind).." "..tostring(claim.state)
+        if not claim_counts[label] then claim_counts[label]=0; claim_order[#claim_order+1]=label end
+        claim_counts[label]=claim_counts[label]+1
+    end
+    table.sort(claim_order)
+    local claim_parts={}
+    for _,label in ipairs(claim_order) do claim_parts[#claim_parts+1]=claim_counts[label].." "..label end
+    if #claim_parts>0 then
+        local total=tonumber(r.claims_total) or #r.claims
+        lines[#lines+1]="Claims held by this road: "..total.." ("..table.concat(claim_parts,", ")..(total>#r.claims and "; first "..#r.claims.." shown" or "").."). Uncertain claims are never released automatically."
+    end
     if r.note then lines[#lines+1]=r.note end
     return table.concat(lines," ")
 end
