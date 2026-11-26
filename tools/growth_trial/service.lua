@@ -37,6 +37,7 @@ local commands = load('commands')
 local growth_policy = load('growth_policy')
 local connectors, towns_adapter, towns_destinations = load('connectors'), load('towns_adapter'), load('towns_destinations')
 local road_destinations = load('road_destinations')
+local growth_scheduler = load('growth_scheduler')
 local access = surface.engine_access(core)
 local SID, EXIT = 'trial:0:0', '+x:200:0'
 local COBBLE, DIRT = 'mcl_core:cobble', 'mcl_core:dirt'
@@ -167,6 +168,10 @@ local function services(trap, counters, opts)
         counters.surveys = counters.surveys + 1
         local r = rect(p, q)
         check(r.min_x >= a.x and r.max_x <= b.x and r.min_z >= a.z and r.max_z <= b.z, 'trial area too small')
+        if trap.fail_survey then
+            -- A scripted terrain-survey failure: the cycle stops with zero writes (a blocked road).
+            return nil, {code = 'survey_failed', reason = 'scripted survey failure'}
+        end
         if trap.survey then
             -- Planning never finishes: the interrupted cycle stays in the surveying stage.
             local job = {}
@@ -289,10 +294,46 @@ local function services(trap, counters, opts)
         d.center = {x = spec.anchor.x - 10, y = 0, z = spec.anchor.z}
         exits[spec.sid .. '/' .. spec.exit] = d
     end
+    -- Scheduler scenario: the real proximity scheduler over this trial's growth service, with
+    -- scripted connected players and positions (players[name] = feet position, or nil).
+    local proximity, players, extends = nil, {}, {}
+    if opts.scheduler then
+        proximity = check(growth_scheduler.new({enabled = true, now = now,
+            connected = function()
+                local names = {}
+                for name, pos in pairs(players) do if pos then names[#names + 1] = name end end
+                return names
+            end,
+            sample = function(name) return players[name] and copy(players[name]) or nil end,
+            roads = function()
+                local list = {}
+                for _, id in ipairs(gstore:road_ids()) do
+                    local road = gstore:road(id)
+                    if road then
+                        list[#list + 1] = {road_id = id, revision = road.revision, endpoint = road.endpoint, state = road.state,
+                            activation = road.activation}
+                    end
+                end
+                return list
+            end,
+            slot_busy = function() return slot_jobs.active ~= nil end,
+            extend = function(road_id, actor)
+                -- The record is made before the call: a cycle cut off inside extend never returns.
+                local road = gstore:road(road_id)
+                local who = players.walker
+                local record = {road_id = road_id, actor = actor, revision = road and road.revision,
+                    dist = who and road and math.sqrt((who.x - road.endpoint.x) ^ 2 + (who.z - road.endpoint.z) ^ 2) or nil}
+                extends[#extends + 1] = record
+                local id, err = service:extend(road_id, actor)
+                record.id, record.err = id, err
+                return id, err
+            end,
+            log = function(l, m) core.log(l, m) end}))
+    end
     local command_defs = {}
     assert(commands.register({register_chatcommand = function(name, def) command_defs[name] = def end,
         get_player_by_name = function() return nil end}, slot_jobs, surface, function() return config end,
-        nil, nil, {service = service}))
+        nil, nil, {service = service, scheduler = proximity}))
     outward_service_ref = outward_service
     -- Same startup order as init.lua.
     outward_service:recover(); service:recover()
@@ -304,7 +345,7 @@ local function services(trap, counters, opts)
     end
     local function show(towns) visible = {}; for _, t in ipairs(towns) do visible[t.id] = true end end
     return {service = service, outward = outward_service, gstore = gstore, show = show, slot_jobs = slot_jobs, try = try, grow = grow,
-        exits = exits, joins = joins_service, add_exit = add_exit}
+        exits = exits, joins = joins_service, add_exit = add_exit, proximity = proximity, players = players, extends = extends}
 end
 
 -- Polls predicate every half second (80 s limit), then calls then_do. Both run guarded.
@@ -706,13 +747,303 @@ local function junction_two(done, mod_storage)
     end)
 end
 
+------------------------------------------------------------------ scheduler scenario
+-- Automatic growth by player proximity (#53). The REAL growth_scheduler runs over this
+-- trial's real growth service; only the player is scripted: connected() and sample()
+-- return a scripted position that the driver moves one waypoint per scheduler tick (the
+-- scheduler's own 1 s sampling interval, real time), so a walk is a sequence of samples
+-- exactly as a client's would be. Everything else (growth, planner, builder, claims,
+-- storage, the /roads_grow definition) is as in the growth scenario. The world is the growth
+-- world (walls, `away`) with the `steer` town moved 96 nodes further so the final
+-- attachment is the fifth cycle.
+--   phase 1: stationary player inside the radius (no arming); automatic cycles 1 and 2 from
+--   the old forward inner edge; an edited seam refuses the next automatic cycle (seam_changed,
+--   no retry loop); a scripted survey failure stops cycle 3 (blocked, never retried
+--   automatically, deliberate retry builds it); cycle 4 is cut off (planning or build).
+--   phase 2 (restart): nothing is replayed with a player standing at the endpoint; planning
+--   mode retries cycle 4 deliberately and cycle 5 is the automatic final attachment.
+local SCHED_KEY = 'trial_scheduler_expect'
+local WALKER = 'walker'
+local function sched_towns()
+    TOWNS = {steer = layout.towns(ORIGIN_X + CYCLE).steer, away = layout.towns(ORIGIN_X).away}
+    STEER = TOWNS.steer.exits[1]
+    STEER_FULL_ID = TOWNS.steer.id .. '/' .. STEER.id
+end
+local function at(x) return {x = x, y = 1, z = 0} end
+-- Waypoints ending exactly at `to`, spaced 12 nodes (a walking pace per 1 s sample is slower; the
+-- scheduler only sees positions), starting at `from`. Spacing keeps intermediate samples outside 24.
+local function walk_path(from, to)
+    local list = {}
+    local x = to
+    while x > from do table.insert(list, 1, at(x)); x = x - 12 end
+    table.insert(list, 1, at(from))
+    return list
+end
+local function stay(x, n) local list = {}; for i = 1, n do list[i] = at(x) end; return list end
+local function join(...)
+    local out = {}
+    for _, part in ipairs({...}) do for _, p in ipairs(part) do out[#out + 1] = p end end
+    return out
+end
+
+-- Moves the scripted player one waypoint per scheduler tick. Growth started by the scheduler is
+-- waited out (the player stands where the trigger sample put it); then_do runs once the last
+-- waypoint has been sampled and the slot and queue are idle. No cycle may start before the last waypoint.
+local function drive(s, trap, positions, then_do, trigger)
+    trigger = trigger or #positions   -- the waypoint at which a start is expected; none may happen earlier
+    local i, last, before = 1, s.proximity.ticks, #s.extends
+    local started = core.get_us_time() / 1e6
+    s.players[WALKER] = positions[1]
+    local poll
+    poll = guarded(function()
+        if trap.stop then return end
+        s.proximity:step()
+        if s.proximity.ticks ~= last then
+            last = s.proximity.ticks
+            if i < trigger then
+                assert(#s.extends == before, 'automatic growth started before waypoint ' .. trigger .. ' (waypoint ' .. i .. ' of ' .. #positions
+                    .. ', x ' .. positions[i].x .. ')')
+            end
+            if s.slot_jobs.active == nil and s.proximity.queue:size() == 0 then
+                if i >= #positions then return then_do() end
+                i = i + 1
+                s.players[WALKER] = positions[i]
+            end
+        end
+        if core.get_us_time() / 1e6 - started > 240 then error('scripted walk timed out') end
+        core.after(0.1, poll)
+    end)
+    poll()
+end
+
+local function sched_trap(mod_storage, done, s_ref)
+    local trap = {mod_storage = mod_storage}
+    function trap.fire(kind)
+        if trap.stop then return end
+        trap.stop = true
+        local rec = s_ref.s.extends[#s_ref.s.extends]
+        assert(rec and rec.actor == 'proximity' and rec.dist and rec.dist <= 24,
+            'the interrupted cycle was not started by the scheduler: ' .. core.serialize(rec))
+        core.log('action', 'GROWTH_TRIAL_INTERRUPT ' .. kind .. ' ' .. core.serialize({actor = rec.actor, dist = rec.dist}))
+        done()
+    end
+    return trap
+end
+
+local function sched_one(done, mod_storage)
+    local mode = core.settings:get('roads_trial_interrupt') or 'planning'
+    assert(mode == 'planning' or mode == 'build', 'roads_trial_interrupt must be planning or build')
+    fill_area()
+    local ref = {}
+    local trap = sched_trap(mod_storage, done, ref)
+    local counters = {surveys = 0, builds = 0}
+    local s = services(trap, counters, {scheduler = true})
+    ref.s = s
+    local service, gstore, grow = s.service, s.gstore, s.grow
+    check(s.outward:start({settlement_id = SID, exit_id = EXIT, requester = 'trial', policy = {version = 1, seed = 1},
+        candidates = {{x = ORIGIN_X, z = 0}}}))
+    wait(function() return s.outward:status() == nil end, function()
+        local status = check(s.outward:status(SID))
+        assert(status.state == 'built' and status.writes == 'all', core.serialize(status.error))
+        assert(grow('adopt ' .. status.op_id):find('is adopted from outward operation', 1, true))
+        local road_id = 'growth:v1:' .. status.op_id
+        local function cur() return check(service:status(road_id)) end
+        local first = cur()
+        assert(first.endpoint.x == ORIGIN_X and first.revision == 1 and first.state == 'open')
+        local report = grow('status ' .. road_id)
+        assert(report:find('Automatic growth is enabled', 1, true) and report:find('Waiting for a player', 1, true), report)
+
+        -- One automatic cycle: the player walks on from where the previous trigger left them, with no
+        -- backtracking, until the first sample inside 24 of the new endpoint.
+        local function advance(towns, from, then_do)
+            local st = cur()
+            local before = #s.extends
+            s.show(towns)
+            drive(s, trap, walk_path(from or s.players[WALKER].x, st.endpoint.x - 20), function()
+                assert(#s.extends == before + 1, 'expected one automatic start, saw ' .. (#s.extends - before))
+                local rec = s.extends[#s.extends]
+                assert(rec.id and rec.actor == 'proximity' and rec.dist <= 24 and rec.revision == st.revision, core.serialize(rec))
+                local now_status = cur()
+                assert(now_status.state == 'open' and now_status.revision == st.revision + 1
+                    and now_status.endpoint.x > st.endpoint.x and now_status.endpoint.z == 0, core.serialize(now_status))
+                assert(node_name(now_status.endpoint) == COBBLE)
+                assert(grow('inspect ' .. road_id):find('World: matches_intended', 1, true))
+                core.log('action', 'GROWTH_TRIAL_SCHEDULER_AUTO ' .. core.serialize({from = st.endpoint.x, to = now_status.endpoint.x,
+                    revision = now_status.revision, trigger_dist = rec.dist, trigger_x = s.players[WALKER].x}))
+                then_do(now_status)
+            end)
+        end
+
+        -- Ticks with a player already inside the radius never arm: nothing starts.
+        local x0 = ORIGIN_X
+        drive(s, trap, stay(x0 - 10, 4), function()
+            assert(#s.extends == 0 and service.active == nil and counters.builds == 1, 'a player first seen inside started growth')
+            local armed = s.proximity:status(road_id)
+            assert(armed.armed == 0 and armed.queue.length == 0, core.serialize(armed))
+            advance({}, x0 - 60, function(c1)
+                local text = grow('status ' .. road_id)
+                assert(text:find('Selected: none', 1, true) and text:find('built (directional)', 1, true), text)
+                advance({TOWNS.away}, nil, function(c2)
+                    local text2 = grow('status ' .. road_id)
+                    assert(text2:find('built (directional)', 1, true)
+                        and text2:find('destination ' .. TOWNS.away.exits[1].id .. ' (final) incompatible_heading', 1, true)
+                        and text2:find('96 node fallback composed', 1, true), text2)
+                    core.log('action', 'GROWTH_TRIAL_FALLBACK ' .. text2)
+                    -- Edited seam at the c2 endpoint: the automatic start is refused and not repeated.
+                    local _, record = count_bends(gstore, c2.last_segment_id)
+                    local edit = check(layout.seam_edit_node(record.next_seam.preserved, c2.endpoint), 'endpoint not in the preserved seam')
+                    edit = {x = edit.x, y = edit.y, z = edit.z, name = edit.name}
+                    local ahead = {x = c2.endpoint.x + 4, y = 0, z = 0}
+                    local ahead_name = node_name(ahead)
+                    core.swap_node(edit, {name = DIRT})
+                    local builds, before = counters.builds, #s.extends
+                    local seam_walk = walk_path(s.players[WALKER].x, c2.endpoint.x - 20)
+                    drive(s, trap, join(seam_walk, stay(c2.endpoint.x - 20, 4)), function()
+                        assert(#s.extends == before + 1, 'the refused cycle was started ' .. (#s.extends - before) .. ' times')
+                        local rec = s.extends[#s.extends]
+                        assert(not rec.id and rec.err and rec.err.code == 'seam_changed' and rec.actor == 'proximity', core.serialize(rec))
+                        assert(node_name(edit) == DIRT and node_name(ahead) == ahead_name and counters.builds == builds
+                            and service.active == nil, 'a refused automatic cycle did work or repaired the seam')
+                        local after = cur()
+                        assert(after.state == 'open' and after.revision == c2.revision and after.pending == nil, core.serialize(after))
+                        assert(grow('inspect ' .. road_id):find('World: mismatch', 1, true))
+                        core.log('action', 'GROWTH_TRIAL_SCHEDULER_SEAM_REFUSED ' .. core.serialize(rec.err))
+                        core.swap_node(edit, {name = edit.name})
+                        assert(grow('inspect ' .. road_id):find('World: matches_intended', 1, true))
+                        -- Blocked stop: leave and re-approach; the survey fails once, then never again by itself.
+                        trap.fail_survey = true
+                        s.show({})
+                        local x = c2.endpoint.x
+                        local count = #s.extends
+                        drive(s, trap, walk_path(x - 56, x - 20), function()
+                            assert(#s.extends == count + 1, 'expected one blocked start')
+                            local rec2 = s.extends[#s.extends]
+                            assert(rec2.id and rec2.actor == 'proximity' and rec2.dist <= 24, core.serialize(rec2))
+                            local stopped = cur()
+                            assert(stopped.state == 'stopped' and stopped.stop and stopped.stop.code == 'survey_failed'
+                                and stopped.revision == c2.revision and stopped.pending == nil, core.serialize(stopped))
+                            local blocked = grow('status ' .. road_id)
+                            assert(blocked:find('Blocked: automatic growth never retries a stopped road', 1, true), blocked)
+                            -- Leaving and returning twice (and standing inside): no automatic retry.
+                            drive(s, trap, join(walk_path(x - 56, x - 20), stay(x - 20, 2), walk_path(x - 56, x - 20), stay(x - 20, 3)), function()
+                                assert(#s.extends == count + 1 and service.active == nil and cur().state == 'stopped',
+                                    'a stopped road was retried automatically')
+                                core.log('action', 'GROWTH_TRIAL_SCHEDULER_BLOCKED ' .. blocked:gsub('\n', ' | '))
+                                trap.fail_survey = false
+                                -- Deliberate retry builds the cycle; the scheduler stays out of it.
+                                assert(grow('retry ' .. road_id):find('Retry started as growth cycle', 1, true))
+                                wait(function() return service.active == nil end, function()
+                                    local c3 = cur()
+                                    assert(c3.state == 'open' and c3.revision == c2.revision + 1 and c3.endpoint.x > c2.endpoint.x, core.serialize(c3))
+                                    assert(#s.extends == count + 1, 'the scheduler took part in a deliberate retry')
+                                    -- Cycle 4: the automatic start that is cut off.
+                                    local from = s.players[WALKER].x
+                                    mod_storage:set_string(SCHED_KEY, core.serialize({road_id = road_id, revision = c3.revision,
+                                        endpoint = c3.endpoint, mode = mode, edit = edit, ahead_x = c3.endpoint.x + 4, player_x = c3.endpoint.x - 20,
+                                        extends = #s.extends + 1}))
+                                    trap.survey, trap.build = mode == 'planning', mode == 'build'
+                                    s.show({TOWNS.steer})
+                                    drive(s, trap, walk_path(from, c3.endpoint.x - 20), function()
+                                        error('the cut-off cycle should have stopped the server')
+                                    end)
+                                end)
+                            end)
+                        end)
+                    end, #seam_walk)
+                end)
+            end)
+        end)
+    end)
+end
+
+local function sched_two(done, mod_storage)
+    local raw = mod_storage:get_string(SCHED_KEY)
+    assert(raw ~= '', 'no scheduler expectations from phase 1: was the same world used?')
+    local expect = check(core.deserialize(raw, true))
+    local ref = {}
+    local trap = sched_trap(mod_storage, done, ref)
+    local counters = {surveys = 0, builds = 0}
+    local s = services(trap, counters, {scheduler = true})
+    ref.s = s
+    local service, gstore, grow, try = s.service, s.gstore, s.grow, s.try
+    local road_id = expect.road_id
+    local road = check(gstore:road(road_id), 'road ' .. road_id .. ' is not in the persisted registry')
+    assert(road.revision == expect.revision and road.endpoint.x == expect.endpoint.x, core.serialize(road))
+    if expect.mode == 'planning' then
+        assert(road.state == 'stopped' and road.stop.code == 'interrupted' and road.pending == nil, core.serialize(road))
+    else
+        assert(road.state == 'uncertain' and road.pending and road.pending.state == 'uncertain' and road.stop.code == 'interrupted', core.serialize(road))
+    end
+    core.log('action', 'GROWTH_TRIAL_RESTART ' .. core.serialize({mode = expect.mode, state = road.state, stop = road.stop, revision = road.revision}))
+    -- The scheduler is running and a player stands at the endpoint of the interrupted road, after
+    -- a first sample from far away, for several ticks: nothing is replayed, nothing is retried.
+    local ex = expect.endpoint.x
+    drive(s, trap, join(walk_path(ex - 56, ex - 10), stay(ex - 10, 5)), function()
+        assert(#s.extends == 0 and service.active == nil and counters.builds == 0 and counters.surveys == 0,
+            'work was started after restart with a player present')
+        assert(node_name({x = expect.ahead_x, y = 0, z = 0}) ~= COBBLE, 'the interrupted cycle wrote terrain ahead of the endpoint')
+        local report = grow('status ' .. road_id)
+        assert(not report:find('Queued for automatic growth', 1, true), report)
+        assert(check(gstore:road(road_id)).state == road.state, 'state changed on its own')
+        if expect.mode == 'planning' then
+            assert(report:find('Blocked: automatic growth never retries a stopped road', 1, true), report)
+            core.log('action', 'GROWTH_TRIAL_SCHEDULER_NO_REPLAY ' .. core.serialize({ticks = s.proximity.ticks, extends = #s.extends}))
+            s.show({TOWNS.steer})
+            assert(grow('retry ' .. road_id):find('Retry started as growth cycle', 1, true))
+            wait(function() return service.active == nil end, function()
+                local c4 = check(service:status(road_id))
+                assert(c4.state == 'open' and c4.revision == expect.revision + 1 and c4.endpoint.x > ex, core.serialize(c4))
+                assert(#s.extends == 0, 'the scheduler took part in a deliberate retry')
+                -- Cycle 5: the automatic final attachment to the built exit, from the old forward inner edge.
+                drive(s, trap, walk_path(s.players[WALKER].x, c4.endpoint.x - 20), function()
+                    assert(#s.extends == 1, 'expected one automatic start, saw ' .. #s.extends)
+                    local rec = s.extends[1]
+                    assert(rec.id and rec.actor == 'proximity' and rec.dist <= 24 and rec.revision == c4.revision, core.serialize(rec))
+                    local after = check(service:status(road_id))
+                    assert(after.state == 'connected' and after.revision == c4.revision + 1
+                        and after.connected.approach_id == STEER.id and after.connected.id == TOWNS.steer.id, core.serialize(after))
+                    local record = check(gstore:load_record(after.last_segment_id))
+                    local final = record.headings[#record.headings]
+                    assert(final == 7 or final == 0 or final == 1, 'arrival heading ' .. final .. ' does not face into the town')
+                    local claim = check(gstore:claim('exit:' .. STEER_FULL_ID))
+                    assert(claim.state == 'held' and claim.road_id == road_id, 'the full exit id stays claimed')
+                    assert(arrived(c4.endpoint.x), 'no walkable path from the seam onto the built exit')
+                    local inspected = grow('inspect ' .. road_id)
+                    assert(inspected:find('World: matches_intended', 1, true) and inspected:find('matches the intended geometry', 1, true), inspected)
+                    -- A connected road never arms again, even with the player at the exit.
+                    drive(s, trap, join(walk_path(after.endpoint.x - 60, after.endpoint.x), stay(after.endpoint.x, 3)), function()
+                        assert(#s.extends == 1 and service.active == nil, 'a connected road was grown again')
+                        core.log('action', 'GROWTH_TRIAL_SCHEDULER_ARRIVAL ' .. core.serialize({state = after.state, endpoint = after.endpoint,
+                            revision = after.revision, trigger_dist = rec.dist, final_heading = final, walkable = true, claim = claim.state}))
+                        done()
+                    end)
+                end)
+            end)
+        else
+            local ok, msg = try('extend ' .. road_id)
+            assert(not ok and msg:find('not_extendable', 1, true), tostring(msg))
+            ok, msg = try('retry ' .. road_id)
+            assert(not ok and msg:find('not_retryable', 1, true), tostring(msg))
+            assert(counters.builds == 0 and counters.surveys == 0 and check(gstore:road(road_id)).state == 'uncertain')
+            core.log('action', 'GROWTH_TRIAL_SCHEDULER_NO_REPLAY ' .. core.serialize({ticks = s.proximity.ticks, extends = #s.extends,
+                state = 'uncertain'}))
+            done()
+        end
+    end)
+end
+
 return function(phase, done, mod_storage)
-    local junction = core.settings:get('roads_trial_scenario') == 'junction'
+    local scenario = core.settings:get('roads_trial_scenario')
+    local junction = scenario == 'junction'
+    local scheduler = scenario == 'scheduler'
     if junction then a, b = J.a, J.b end
+    if scheduler then b = {x = 800, y = 31, z = 70}; sched_towns() end
     core.emerge_area(a, b, function(_, _, left)
         if left ~= 0 then return end
         core.after(0, guarded(function()
-            if junction then
+            if scheduler then
+                if phase == 1 then sched_one(done, mod_storage) else sched_two(done, mod_storage) end
+            elseif junction then
                 if phase == 1 then junction_one(done, mod_storage) else junction_two(done, mod_storage) end
             elseif phase == 1 then phase_one(done, mod_storage) else phase_two(done, mod_storage) end
         end))
