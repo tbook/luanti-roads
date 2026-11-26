@@ -724,5 +724,58 @@ of the design above:
   it would mean subtracting from exclusions, which this design forbids.
 - **Not covered.** See `tools/growth_trial/README.md` for what the engine trials do
   and do not cover (the real Towns mod is not loaded; its published data is scripted
-  over really built exit nodes). Existing-road junctions (#52), the village provider
-  (#43) and automatic scheduling (#53) are untouched.
+  over really built exit nodes). The village provider (#43) and automatic scheduling
+  (#53) are untouched.
+
+## Slice G implementation notes (#52)
+
+Implemented in `src/road_destinations.lua` (provider, resolver, availability lookup),
+`src/growth_store.lua` (`nearby`, `claims_of`), small additive changes in `src/growth.lua`,
+`src/connectors.lua`/`src/edges.lua` (road-join connector) and `init.lua` wiring. Towns code
+paths are unchanged. Interpretations of the design above:
+
+- **Provider.** `kind="road"`, `id` = target growth road id, `approach_id` =
+  `<segment id>#t<first edge>:<d>` (T) or `<segment id>#end:<d>` (open endpoint), `d` = e/w/n/s,
+  the direction from the target toward the incoming road; `position` = the run point nearest the
+  endpoint (T) or the endpoint. Discovery uses `store:nearby` (at most 100 cells and 1,024 index
+  references, nearest first; hitting a cap is reported `truncated`, never an error) and reads at most
+  28 segment records and 256 descriptors per query; selection (`unavailable`) uses registry data
+  only, and the retained candidates' resolve reads one record each, so a whole selection stays within
+  32 record reads. Only built/verified entries of adopted roads not
+  planning/building/uncertain are listed; an unreadable record fails the cycle closed. Approaches
+  need the endpoint at least 7 nodes beyond the target centre (landing room).
+- **Compatible targets.** T: a straight, flat, cardinal run of one stored segment at least 8 nodes
+  long (join positions stay 3 nodes inside the run, so the claim interval lies on the straight band).
+  End to end: the last edge of an open or stopped road's latest segment, if cardinal and flat. Bends,
+  diagonals, slopes, uncertain and unadopted segments offer nothing. Actual nodes decide: the
+  preserved patch is read from the world, so an edited or missing road node refuses the join.
+- **Geometry.** The join reuses the plan-v3 goal connector (`published_exit` origin) with a
+  synthesized exit: three rows of the target road across its full width, three wide. `exit.kind =
+  "road"` is the only case where `edges.connector_constraints` accepts width 3; Towns stays 2 or 4.
+  The flat transition and 3x3 landing cap start one row beyond that patch and bridge offset
+  lattices (lateral shift up to 3, 1-8 rows). Road exits carry no `footprint` rectangle, so the
+  Towns-style "landing outside the destination footprint" check does not apply to them; what keeps
+  the new surfaces off the target is the three-row patch covering its full width, the planner and
+  composer treating road nodes as non-natural (a transition or landing column must be natural
+  ground at the landing height) and the growth obstacle mask of every stored footprint. The final
+  heading is opposite the join direction or one 45-degree step off. Target nodes are exact
+  preserved expectations, never written.
+- **Claims.** `join:<axis>:<line>:<coord>`, one per node along the target line over the preserved
+  strip plus 2 nodes either side (7 for a T, 5 for an end join), independent of side, so overlapping
+  intervals share an id. An end join also claims `endjoin:<target road id>`, which makes the
+  target's `extend` refuse (also when uncertain). They are written in the segment's registry
+  update, stay `held`, become `uncertain` after interruption and persist across restart. The exact
+  interval is known only after survey, so an attachment's `endpoint()` may return `claims` and
+  `joined` (additive contract). Competing joins skip claimed positions (at most 8 geometry
+  inspections per attempt). Headroom: a cycle holds at most 8 destination-side claims
+  (`MAX_CLAIMS_PER_CYCLE`) including any the caller passes to `extend`; a T needs 7 and an end
+  join 6, so a caller may supply at most 1 (T) or 2 (end) extra claims. More is rejected with
+  `attachment_rejected` naming the cap, never silently dropped. `/roads_grow` passes none.
+- **Who stops.** T: the incoming road is `connected`; the target is untouched and may continue.
+  End to end: the same registry update sets the target `connected` (only if it is still open or
+  stopped at the same revision). Whichever of two facing roads runs first joins and stops both.
+- **Verification.** `connected` only after `connectors.verify_arrival` walks the finished road
+  onto the target's own nodes after construction.
+- **Limits.** The landing must be flat natural ground at the road's level: a T onto a road on
+  fill or beside a hillside is refused with the reason. A target footprint is an obstacle, so a road
+  is never crossed or paved over.

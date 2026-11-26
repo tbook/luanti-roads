@@ -36,6 +36,7 @@ local outward, outward_store, growth, growth_store = load('outward'), load('outw
 local commands = load('commands')
 local growth_policy = load('growth_policy')
 local connectors, towns_adapter, towns_destinations = load('connectors'), load('towns_adapter'), load('towns_destinations')
+local road_destinations = load('road_destinations')
 local access = surface.engine_access(core)
 local SID, EXIT = 'trial:0:0', '+x:200:0'
 local COBBLE, DIRT = 'mcl_core:cobble', 'mcl_core:dirt'
@@ -142,7 +143,11 @@ local function diagnose(x, z)
         light = core.get_natural_light({x = x, y = b.y, z = z}, 0.5), odd = odd}))
 end
 
-local function services(trap, counters)
+-- opts.roads: the junction scenario. The registered-road provider and resolver are the
+-- only destination provider (no Towns), exits are looked up per settlement and exit id.
+local function services(trap, counters, opts)
+    opts = opts or {}
+    local exits, joins_service = {}, nil
     local slot_jobs = {active = nil}
     function slot_jobs:hold(holder)
         if self.active then return nil, {code = 'busy', reason = 'slot busy'} end
@@ -240,7 +245,7 @@ local function services(trap, counters)
         profile = {{y = 0, name = COBBLE, param2 = 0}}, center = {x = 190, y = 0, z = 0}, town_type = 'village'}
     local towns = {}
     function towns:settlement(id) return {id = id} end
-    function towns:exit() return copy(descriptor) end
+    function towns:exit(settlement, exit_id) return copy(exits[settlement.id .. '/' .. tostring(exit_id)] or descriptor) end
     function towns:writer() return nil end
     function towns:overlay() return {} end
     function towns:recheck() return true end
@@ -252,8 +257,16 @@ local function services(trap, counters)
     local ostore = outward_store.new({storage = storage, serialize = core.serialize, deserialize = deserialize, now = os.time})
     local interval = function() return tonumber(core.settings:get('server_map_save_interval')) or 5.3 end
     local outward_service
-    local service = check(growth.new({policy = growth_policy, providers = dest.providers, attachments = dest.attachments,
-        destination_unavailable = dest.unavailable, towns = adapter, wrap_terrain = towns_adapter.wrap_terrain,
+    local providers, attachments, unavailable = dest.providers, dest.attachments, dest.unavailable
+    if opts.roads then
+        local joins = road_destinations.new({store = gstore, digest = towns_destinations.revision, connectors = connectors,
+            edges = edges, raster = raster, surface = surface, access = access,
+            load = function(minp, maxp) return core.load_area(minp, maxp) end, has_timer = timer, owner = growth.OWNER})
+        providers, attachments, unavailable = joins.providers, joins.attachments, joins.unavailable
+        joins_service = joins
+    end
+    local service = check(growth.new({policy = growth_policy, providers = providers, attachments = attachments,
+        destination_unavailable = unavailable, towns = adapter, wrap_terrain = towns_adapter.wrap_terrain,
         store = gstore, jobs = slot_jobs, now = now, after = core.after, raster = raster, seam = seam,
         access = access, has_timer = timer, classify = surface.classify, load_area = core.load_area,
         world_config = function() return config end, survey = survey, start_survey = start_survey, new_planner = new_planner,
@@ -270,6 +283,12 @@ local function services(trap, counters)
         end,
         new_planner = new_planner, compose = compose, start_build = start_build, wrap_terrain = function(t) return t end,
         save_interval = interval, growth = service.hooks, log = function(l, m) core.log(l, m) end}))
+    local function add_exit(spec)
+        local d = copy(descriptor)
+        d.settlement_id = spec.sid; d.exit_id = spec.exit; d.anchor = copy(spec.anchor); d.direction = copy(spec.direction)
+        d.center = {x = spec.anchor.x - 10, y = 0, z = spec.anchor.z}
+        exits[spec.sid .. '/' .. spec.exit] = d
+    end
     local command_defs = {}
     assert(commands.register({register_chatcommand = function(name, def) command_defs[name] = def end,
         get_player_by_name = function() return nil end}, slot_jobs, surface, function() return config end,
@@ -284,7 +303,8 @@ local function services(trap, counters)
         return msg
     end
     local function show(towns) visible = {}; for _, t in ipairs(towns) do visible[t.id] = true end end
-    return {service = service, outward = outward_service, gstore = gstore, show = show, slot_jobs = slot_jobs, try = try, grow = grow}
+    return {service = service, outward = outward_service, gstore = gstore, show = show, slot_jobs = slot_jobs, try = try, grow = grow,
+        exits = exits, joins = joins_service, add_exit = add_exit}
 end
 
 -- Polls predicate every half second (80 s limit), then calls then_do. Both run guarded.
@@ -490,11 +510,211 @@ local function phase_two(done, mod_storage)
     end)
 end
 
+------------------------------------------------------------------ junction scenario
+-- Roads joining roads (#52), in its own disposable world (roads_trial_scenario = junction).
+-- A flat stone world holds four fresh seeded roads, each built by the real outward
+-- service and adopted: A runs east along z = 0 (x 208..248); B comes from the south
+-- (x = 228) and joins A in a T; C comes from the east facing A's open endpoint and joins
+-- it end to end; D comes from the north (x = 216) and is the cut-off cycle (a second,
+-- clear T interval). Towns is absent: the registered-road provider is the only one.
+-- Every junction is checked by an independent breadth-first walk over the real nodes,
+-- by byte-for-byte comparison of the target road, and by the claims persisted.
+local J = {
+    a = {x = 160, y = -32, z = -110}, b = {x = 360, y = 31, z = 110},
+    A = {sid = 'junction:a', exit = '+x:200:0', anchor = {x = 200, y = 0, z = 0}, direction = {x = 1, z = 0}, target = {x = 248, z = 0}},
+    B = {sid = 'junction:b', exit = '+z:220:-60', anchor = {x = 220, y = 0, z = -60}, direction = {x = 0, z = 1}, target = {x = 228, z = -20}},
+    C = {sid = 'junction:c', exit = '-x:312:0', anchor = {x = 312, y = 0, z = 0}, direction = {x = -1, z = 0}, target = {x = 280, z = 0}},
+    D = {sid = 'junction:d', exit = '-z:208:60', anchor = {x = 208, y = 0, z = 60}, direction = {x = 0, z = -1}, target = {x = 216, z = 20}},
+}
+local JUNCTION_KEY = 'trial_junction_expect'
+
+local function fill_junction_area()
+    local vm = core.get_voxel_manip()
+    local emin, emax = vm:read_from_map(J.a, J.b)
+    local area = VoxelArea:new({MinEdge = emin, MaxEdge = emax}); local data = vm:get_data()
+    local stone, air = core.get_content_id('mcl_core:stone'), core.get_content_id('air')
+    for z = J.a.z, J.b.z do for y = J.a.y, J.b.y do for x = J.a.x, J.b.x do data[area:index(x, y, z)] = y <= 0 and stone or air end end end
+    vm:set_data(data); vm:write_to_map(); vm:update_map()
+end
+
+-- Names and param2 of every node of a box: the target road must be byte for byte unchanged.
+local function signature(x1, x2, z1, z2)
+    core.load_area({x = x1, y = -6, z = z1}, {x = x2, y = 6, z = z2})
+    local out = {}
+    for x = x1, x2 do for z = z1, z2 do for y = -4, 5 do
+        local n = core.get_node({x = x, y = y, z = z}); out[#out + 1] = n.name .. '/' .. n.param2
+    end end end
+    return table.concat(out, ',')
+end
+local function a_signature() return signature(207, 249, -1, 1) end
+
+-- Every listed "x:z" must be reachable by the walking oracle from (sx, sz).
+local function must_reach(sx, sz, box, list, what)
+    local reached = walk_world(sx, sz, box)
+    for _, key in ipairs(list) do assert(reached[key], what .. ': ' .. key .. ' is not walkable from ' .. sx .. ':' .. sz) end
+    return reached
+end
+local JBOX = {x1 = 190, x2 = 340, z1 = -80, z2 = 80}
+
+local function build_road(s, spec, then_do)
+    s.add_exit(spec)
+    check(s.outward:start({settlement_id = spec.sid, exit_id = spec.exit, requester = 'trial', policy = {version = 1, seed = 1},
+        candidates = {spec.target}}))
+    wait(function() return s.outward:status() == nil end, function()
+        local status = check(s.outward:status(spec.sid))
+        assert(status.state == 'built' and status.writes == 'all', core.serialize(status.error))
+        assert(s.grow('adopt ' .. status.op_id):find('is adopted from outward operation', 1, true))
+        then_do('growth:v1:' .. status.op_id)
+    end)
+end
+local function cycle(s, road_id, then_do)
+    assert(s.grow('extend ' .. road_id):find('started', 1, true))
+    wait(function() return s.service.active == nil end, then_do)
+end
+local function claim_state(gstore, id) local c = gstore:claim(id); return c and c.state end
+
+local function junction_one(done, mod_storage)
+    local mode = core.settings:get('roads_trial_interrupt') or 'planning'
+    assert(mode == 'planning' or mode == 'build', 'roads_trial_interrupt must be planning or build')
+    fill_junction_area()
+    local trap, fired = {mod_storage = mod_storage}, false
+    function trap.fire(kind)
+        if fired then return end
+        fired = true
+        core.log('action', 'GROWTH_TRIAL_INTERRUPT ' .. kind)
+        done()
+    end
+    local counters = {surveys = 0, builds = 0}
+    local s = services(trap, counters, {roads = true})
+    local service, gstore = s.service, s.gstore
+    build_road(s, J.A, function(A)
+        local target_before = a_signature()
+        build_road(s, J.B, function(B)
+            cycle(s, B, function()
+                -- T junction: B stops, A is untouched and still open, the interval is claimed.
+                local st = check(service:status(B))
+                assert(st.state == 'connected' and st.connected.kind == 'road' and st.connected.id == A
+                    and st.connected.junction == 't', core.serialize(st))
+                local text = s.grow('status ' .. B)
+                assert(text:find('Connected to road ' .. A .. ' by a T junction', 1, true), text)
+                assert(check(service:status(A)).state == 'open' and a_signature() == target_before, 'the T junction touched the target road')
+                for u = 225, 231 do assert(claim_state(gstore, 'join:x:0:' .. u) == 'held', 'join claim ' .. u) end
+                assert(gstore:claim('join:x:0:224') == nil and gstore:claim('join:x:0:232') == nil, 'the interval is exactly 7 nodes')
+                local inspected = s.grow('inspect ' .. B)
+                assert(inspected:find('World: matches_intended', 1, true) and inspected:find('Attachment: checked', 1, true)
+                    and inspected:find('matches the intended geometry', 1, true), inspected)
+                -- Walk every branch: B's start, B's end, onto A and out along both of A's ends.
+                must_reach(228, -60, JBOX, {'228:-60', '228:-20', '228:-4', '228:-2', '228:-1', '228:0', '228:1', '208:0', '248:0', '207:1', '249:-1'}, 'T junction')
+                core.log('action', 'GROWTH_TRIAL_T_JUNCTION ' .. core.serialize({road = B, target = A, junction = st.connected.junction}))
+                build_road(s, J.C, function(C)
+                    cycle(s, C, function()
+                        -- End to end: both unfinished endpoints stop; A can no longer grow.
+                        local ca, cc = check(service:status(A)), check(service:status(C))
+                        assert(cc.state == 'connected' and cc.connected.id == A and cc.connected.junction == 'end', core.serialize(cc))
+                        assert(ca.state == 'connected' and ca.connected.id == C, core.serialize(ca))
+                        assert(claim_state(gstore, 'endjoin:' .. A) == 'held', 'the target endpoint stays claimed')
+                        local ok, msg = s.try('extend ' .. A)
+                        assert(not ok and msg:find('not_extendable', 1, true), tostring(msg))
+                        assert(a_signature() == target_before, 'the end-to-end join touched the target road')
+                        local text2 = s.grow('status ' .. C)
+                        assert(text2:find('Connected to road ' .. A .. ' end to end', 1, true), text2)
+                        local inspected2 = s.grow('inspect ' .. C)
+                        assert(inspected2:find('World: matches_intended', 1, true) and inspected2:find('Attachment: checked', 1, true), inspected2)
+                        must_reach(320, 0, JBOX, {'320:0', '280:0', '250:0', '249:0', '248:0', '228:0', '208:0', '228:-20', '228:-60'}, 'end-to-end join')
+                        core.log('action', 'GROWTH_TRIAL_END_JUNCTION ' .. core.serialize({road = C, target = A, junction = cc.connected.junction}))
+                        build_road(s, J.D, function(D)
+                            -- The cut-off cycle: a second T onto A, with a clear interval (213..219).
+                            mod_storage:set_string(JUNCTION_KEY, core.serialize({mode = mode, A = A, B = B, C = C, D = D,
+                                target = target_before}))
+                            trap.survey, trap.build = mode == 'planning', mode == 'build'
+                            assert(s.grow('extend ' .. D):find('started', 1, true))
+                            wait(function() return fired end, function() end)
+                        end)
+                    end)
+                end)
+            end)
+        end)
+    end)
+end
+
+local function junction_two(done, mod_storage)
+    local raw = mod_storage:get_string(JUNCTION_KEY)
+    assert(raw ~= '', 'no junction expectations from phase 1: was the same world used?')
+    local expect = check(core.deserialize(raw, true))
+    local trap, counters = {mod_storage = mod_storage}, {surveys = 0, builds = 0}
+    local s = services(trap, counters, {roads = true})
+    local service, gstore = s.service, s.gstore
+    local A, B, C, D = expect.A, expect.B, expect.C, expect.D
+    -- Earlier junctions survive the restart exactly: states, connections and held claims.
+    assert(check(gstore:road(A)).state == 'connected' and check(gstore:road(B)).state == 'connected'
+        and check(gstore:road(C)).state == 'connected', 'the finished junction roads changed state')
+    assert(gstore:road(B).connected.id == A and gstore:road(C).connected.id == A and gstore:road(A).connected.id == C)
+    for u = 225, 231 do assert(claim_state(gstore, 'join:x:0:' .. u) == 'held', 'join claim ' .. u .. ' after restart') end
+    assert(claim_state(gstore, 'endjoin:' .. A) == 'held')
+    assert(a_signature() == expect.target, 'the target road changed across the restart')
+    local road = check(gstore:road(D))
+    local joins = gstore:claims_of(D, 64)
+    local text = s.grow('status ' .. D)
+    assert(text:find('interrupted', 1, true), text)
+    if expect.mode == 'planning' then
+        assert(road.state == 'stopped' and road.stop.code == 'interrupted' and road.pending == nil, core.serialize(road))
+        assert(#joins == 0, 'a cycle interrupted in planning holds no claim')
+    else
+        assert(road.state == 'uncertain' and road.pending and road.pending.state == 'uncertain' and road.stop.code == 'interrupted', core.serialize(road))
+        assert(#joins >= 7, 'the interrupted junction keeps its claims (' .. #joins .. ')')
+        for _, c in ipairs(joins) do assert(c.state == 'uncertain', c.id .. ' is ' .. c.state) end
+        for u = 213, 219 do assert(claim_state(gstore, 'join:x:0:' .. u) == 'uncertain', 'join claim ' .. u) end
+    end
+    core.log('action', 'GROWTH_TRIAL_RESTART ' .. core.serialize({mode = expect.mode, state = road.state, claims = #joins}))
+    local started = core.get_us_time() / 1e6
+    wait(function() return core.get_us_time() / 1e6 - started > 3 end, function()
+        assert(service.active == nil and counters.builds == 0 and counters.surveys == 0, 'work was replayed after restart')
+        if expect.mode == 'planning' then
+            -- Deliberate retry: the cut-off T is built now, claims its interval and is walked.
+            assert(s.grow('retry ' .. D):find('Retry started as growth cycle', 1, true))
+            wait(function() return service.active == nil end, function()
+                local after = check(service:status(D))
+                assert(after.state == 'connected' and after.connected.id == A and after.connected.junction == 't', core.serialize(after))
+                for u = 213, 219 do assert(claim_state(gstore, 'join:x:0:' .. u) == 'held', 'retried claim ' .. u) end
+                assert(a_signature() == expect.target, 'the retried junction touched the target road')
+                local inspected = s.grow('inspect ' .. D)
+                assert(inspected:find('World: matches_intended', 1, true) and inspected:find('matches the intended geometry', 1, true), inspected)
+                must_reach(216, 60, JBOX, {'216:60', '216:20', '216:2', '216:1', '216:0', '216:-1', '208:0', '248:0', '280:0', '320:0', '228:-60'}, 'retried T junction')
+                core.log('action', 'GROWTH_TRIAL_JUNCTION_RETRY ' .. core.serialize({road = D, state = after.state, junction = after.connected.junction}))
+                done()
+            end)
+        else
+            local ok, msg = s.try('extend ' .. D)
+            assert(not ok and msg:find('not_extendable', 1, true), tostring(msg))
+            ok, msg = s.try('retry ' .. D)
+            assert(not ok and msg:find('not_retryable', 1, true), tostring(msg))
+            local ok2, report = s.try('inspect ' .. D)
+            assert(ok2 and report:find('World: matches_intended', 1, true) and report:find('Attachment: checked', 1, true)
+                and report:find('matches the intended geometry', 1, true) and report:find('Claims held by this road', 1, true)
+                and report:find('Writes may have happened', 1, true), tostring(report))
+            assert(counters.builds == 0 and counters.surveys == 0 and check(gstore:road(D)).state == 'uncertain')
+            assert(a_signature() == expect.target, 'the interrupted junction touched the target road')
+            -- The written geometry is walkable, but an interrupted junction is never promoted.
+            must_reach(216, 60, JBOX, {'216:60', '216:20', '216:2', '216:1', '216:0', '216:-1', '208:0', '248:0', '320:0'}, 'interrupted T junction')
+            assert(not check(gstore:road(D)).connected, 'an uncertain junction is never connected')
+            -- Retire keeps every reservation.
+            assert(s.grow('retire ' .. D):find('retired', 1, true))
+            assert(claim_state(gstore, 'join:x:0:216') == 'uncertain', 'retire released a claim')
+            core.log('action', 'GROWTH_TRIAL_JUNCTION_INSPECT ' .. report:gsub('\n', ' | '))
+            done()
+        end
+    end)
+end
+
 return function(phase, done, mod_storage)
+    local junction = core.settings:get('roads_trial_scenario') == 'junction'
+    if junction then a, b = J.a, J.b end
     core.emerge_area(a, b, function(_, _, left)
         if left ~= 0 then return end
         core.after(0, guarded(function()
-            if phase == 1 then phase_one(done, mod_storage) else phase_two(done, mod_storage) end
+            if junction then
+                if phase == 1 then junction_one(done, mod_storage) else junction_two(done, mod_storage) end
+            elseif phase == 1 then phase_one(done, mod_storage) else phase_two(done, mod_storage) end
         end))
     end)
 end

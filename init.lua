@@ -19,6 +19,7 @@ local build=load("src/build.lua")
 local seam=load("src/seam.lua")
 local towns_adapter=load("src/towns_adapter.lua")
 local towns_destinations=load("src/towns_destinations.lua")
+local road_destinations=load("src/road_destinations.lua")
 local outward_store=load("src/outward_store.lua")
 local outward=load("src/outward.lua")
 local growth_store=load("src/growth_store.lua")
@@ -117,9 +118,23 @@ do
         load=function(minp,maxp) return core.load_area(minp,maxp) end,
         has_timer=function(pos) return core.get_node_timer(pos):is_started() end,owner=growth.OWNER,
         present=function() return type(rawget(_G,"towns_api"))=="table" end})
+    -- Existing registered roads are the second destination provider: T junctions and
+    -- end-to-end joins. It reads only the growth registry, never the world's mapblocks.
+    local road_joins=road_destinations.new({store=growth_db,digest=towns_destinations.revision,connectors=connectors,
+        edges=edges,raster=raster,surface=surface,access=access,
+        load=function(minp,maxp) return core.load_area(minp,maxp) end,
+        has_timer=function(pos) return core.get_node_timer(pos):is_started() end,owner=growth.OWNER})
+    local growth_providers=setmetatable({},{__index=function(_,kind)
+        if kind=="road" then return road_joins.providers.road end
+        return town_destinations.providers[kind]
+    end})
     local growth_service,growth_error=growth.new({policy=growth_policy,store=growth_db,jobs=controller,now=now,after=ops.after,
-        providers=town_destinations.providers,attachments=town_destinations.attachments,
-        destination_unavailable=town_destinations.unavailable,
+        providers=growth_providers,
+        attachments={town=town_destinations.attachments.town,road=road_joins.attachments.road},
+        destination_unavailable=function(d)
+            if d.kind=="road" then return road_joins.unavailable(d) end
+            return town_destinations.unavailable(d)
+        end,
         raster=raster,seam=seam,access=access,has_timer=function(pos) return core.get_node_timer(pos):is_started() end,
         classify=surface.classify,load_area=function(minp,maxp) return core.load_area(minp,maxp) end,
         world_config=world_config,survey=survey,start_survey=ops.start_survey,new_planner=ops.new_planner,

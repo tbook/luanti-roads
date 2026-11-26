@@ -66,7 +66,16 @@ local function trial()
   end)
  end)
 end
-if phase==2 then
+-- The junction scenario (roads joining roads) is a separate disposable world: it builds
+-- everything through the growth service, so it skips the direct planner trial above.
+if core.settings:get('roads_trial_scenario')=='junction' then
+ core.after(0,function() safe(function()
+  dofile(root..'/service.lua')(phase,function()
+   core.log('action',phase==2 and 'GROWTH_TRIAL_PASS' or 'GROWTH_TRIAL_PHASE1_PASS')
+   core.request_shutdown('growth trial '..phase..' complete',false,0)
+  end,mod_storage)
+ end) end)
+elseif phase==2 then
  core.after(0,function() safe(function()
   dofile(root..'/service.lua')(2,function()
    core.log('action','GROWTH_TRIAL_PASS')

@@ -18,11 +18,16 @@ parser.add_argument('--mg-name', default='singlenode', choices=['singlenode', 'f
 parser.add_argument('--interrupt', default='planning', choices=['planning', 'build'],
     help='where the fourth cycle is cut off before the restart: during planning (zero writes, '
          'expect stopped) or right after construction (expect uncertain)')
-parser.add_argument('--world', help='reuse this existing trial world instead of creating one (use with --phase 2)')
+parser.add_argument('--scenario', default='all', choices=['growth', 'junction', 'all'],
+    help='growth: bends, Towns attachment and interruption; junction: roads joining roads (T and end to end, '
+         'interruption in a second disposable world); all runs both')
+parser.add_argument('--world', help='reuse this existing trial world instead of creating one (use with --phase 2 and one --scenario)')
 parser.add_argument('--phase', type=int, choices=[1, 2], help='run only this phase (2 needs --world)')
 args = parser.parse_args()
 if args.phase == 2 and not args.world:
     parser.error('--phase 2 needs --world from an earlier phase 1')
+if args.world and args.scenario == 'all':
+    parser.error('--world needs one --scenario (growth or junction)')
 root = Path(__file__).resolve().parents[2]
 here = Path(__file__).parent
 
@@ -41,11 +46,11 @@ def make_world():
     return world
 
 
-def launch(world, phase, pass_marker):
+def launch(world, phase, pass_marker, scenario):
     config = world / f'trial-phase{phase}.conf'
     config.write_text(f'mg_name = {args.mg_name}\nserver_announce = false\nport = 30126\n'
         'mg_flags = nodecorations,nocaves,nodungeons\nserver_unload_unused_data_timeout = 100000\nserver_map_save_interval = 5.3\n'
-        f'roads_trial_phase = {phase}\nroads_trial_interrupt = {args.interrupt}\n')
+        f'roads_trial_phase = {phase}\nroads_trial_interrupt = {args.interrupt}\nroads_trial_scenario = {scenario}\n')
     result = subprocess.run([args.luanti, '--server', '--world', str(world), '--config', str(config),
         '--logfile', ''], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=420)
     log = world / f'trial-phase{phase}-output.txt'
@@ -58,13 +63,12 @@ def launch(world, phase, pass_marker):
         raise SystemExit(f'Phase {phase} failed; full output: {log}')
 
 
-if args.world:
-    world = Path(args.world)
-else:
-    world = make_world()
-print(f'Disposable world: {world}', flush=True)
-if args.phase != 2:
-    launch(world, 1, 'GROWTH_TRIAL_PHASE1_PASS')
-if args.phase != 1:
-    launch(world, 2, 'GROWTH_TRIAL_PASS')
-    print('Trial passed: both phases.')
+scenarios = ['growth', 'junction'] if args.scenario == 'all' else [args.scenario]
+for scenario in scenarios:
+    world = Path(args.world) if args.world else make_world()
+    print(f'Disposable world ({scenario}): {world}', flush=True)
+    if args.phase != 2:
+        launch(world, 1, 'GROWTH_TRIAL_PHASE1_PASS', scenario)
+    if args.phase != 1:
+        launch(world, 2, 'GROWTH_TRIAL_PASS', scenario)
+        print(f'Trial passed: both phases ({scenario}).')

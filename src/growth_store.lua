@@ -277,6 +277,20 @@ function store.new(options)
         load(); if not reg or blocked then return nil end
         return copy(reg.claims[id])
     end
+    -- Claims held by one road (as source or destination), at most `limit`, sorted
+    -- by id, with the number held in total.
+    function self:claims_of(road_id, limit)
+        load(); if not reg or blocked then return {}, 0 end
+        local ids = {}
+        for id, claim in pairs(reg.claims) do if claim.road_id == road_id then ids[#ids + 1] = id end end
+        table.sort(ids)
+        local list = {}
+        for i = 1, math.min(#ids, limit or #ids) do
+            local c = reg.claims[ids[i]]
+            list[i] = {id = ids[i], kind = c.kind, state = c.state, side = c.side, segment_id = c.segment_id}
+        end
+        return list, #ids
+    end
     function self:counts()
         load()
         if not reg then return {roads = 0, segments = 0, claims = 0, references = 0} end
@@ -355,6 +369,53 @@ function store.new(options)
         end
         table.sort(ids)
         return ids, {cells = cells, references = references}
+    end
+
+    -- Destination discovery over the same index: entries within `radius` of pos,
+    -- nearest first, visiting at most query_cells cells and query_references
+    -- references (cells nearest to pos first). Unlike collect, hitting a cap is
+    -- not an error: the result reports truncated=true and the farthest cells are
+    -- simply not read. Returns ids, {truncated, cells, references}.
+    function self:nearby(pos, radius)
+        local ok, why = self:health(); if not ok then return nil, why end
+        if type(pos) ~= "table" or not integer(pos.x) or not integer(pos.z) or type(radius) ~= "number"
+            or radius ~= radius or radius < 0 or radius > 1024 then
+            return err("invalid_request", "a position and a radius of at most 1024 are required")
+        end
+        local size = LIMITS.cell_size
+        local cx1, cx2 = math.floor((pos.x - radius) / size), math.floor((pos.x + radius) / size)
+        local cz1, cz2 = math.floor((pos.z - radius) / size), math.floor((pos.z + radius) / size)
+        local cells = {}
+        for cx = cx1, cx2 do
+            for cz = cz1, cz2 do
+                -- Distance from pos to the nearest point of the cell.
+                local dx = math.max(cx * size - pos.x, 0, pos.x - (cx * size + size - 1))
+                local dz = math.max(cz * size - pos.z, 0, pos.z - (cz * size + size - 1))
+                cells[#cells + 1] = {id = cx .. ":" .. cz, d2 = dx * dx + dz * dz}
+            end
+        end
+        table.sort(cells, function(a, b) if a.d2 ~= b.d2 then return a.d2 < b.d2 end return a.id < b.id end)
+        local truncated = #cells > LIMITS.query_cells
+        local seen, found, references, visited = {}, {}, 0, 0
+        for i = 1, math.min(#cells, LIMITS.query_cells) do
+            visited = visited + 1
+            for _, id in ipairs(index[cells[i].id] or {}) do
+                references = references + 1
+                if references > LIMITS.query_references then truncated = true; break end
+                if not seen[id] then
+                    seen[id] = true
+                    local b = reg.segs[id].bounds
+                    local dx = math.max(b.x1 - pos.x, 0, pos.x - b.x2)
+                    local dz = math.max(b.z1 - pos.z, 0, pos.z - b.z2)
+                    if dx * dx + dz * dz <= radius * radius then found[#found + 1] = {id = id, d2 = dx * dx + dz * dz} end
+                end
+            end
+            if references > LIMITS.query_references then break end
+        end
+        table.sort(found, function(a, b) if a.d2 ~= b.d2 then return a.d2 < b.d2 end return a.id < b.id end)
+        local ids = {}
+        for i, f in ipairs(found) do ids[i] = f.id end
+        return ids, {truncated = truncated, cells = visited, references = math.min(references, LIMITS.query_references)}
     end
 
     function self:now() return now() end
