@@ -25,12 +25,12 @@ local function run(cmds, text, who)
     return cmds.roads_grow.func(who or 'admin', text)
 end
 
-test('/roads_grow is server-privileged, states that growth is not automatic, and needs the growth service', function()
+test('/roads_grow is server-privileged, names the automatic setting, and needs the growth service', function()
     local h = harness()
     local def = assert(commands_for(h).roads_grow)
     assert(def.privs and def.privs.server == true)
     local description = def.description:lower()
-    assert(description:find('may generate terrain', 1, true) and description:find('never automatic', 1, true), description)
+    assert(description:find('may generate terrain', 1, true) and description:find('roads_growth_automatic', 1, true), description)
     assert(def.params:find('adopt <outward-op-id>', 1, true) and def.params:find('inspect <road-id>', 1, true), def.params)
     local bare = {}
     assert(commands.register({register_chatcommand = function(name) bare[name] = true end,

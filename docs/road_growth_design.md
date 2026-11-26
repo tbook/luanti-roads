@@ -779,3 +779,59 @@ paths are unchanged. Interpretations of the design above:
 - **Limits.** The landing must be flat natural ground at the road's level: a T onto a road on
   fill or beside a hillside is refused with the reason. A target footprint is an obstacle, so a road
   is never crossed or paved over.
+
+## Slice H implementation notes (#53)
+
+Implemented in `src/growth_scheduler.lua` (proximity sampling, endpoint index, bounded
+queue and admission) with wiring in `init.lua` and presentation in `src/commands.lua`.
+Everything external is injected, so `tests/growth_scheduler.lua` runs the module in pure
+Lua 5.1, with the real growth service in its last tests. Interpretations of the design above:
+
+- **Eligibility uses the existing activation field; no schema change.** Adoption and every
+  publish set `activation = "needs_departure"`; the intent in `extend` sets `consumed`, which a
+  zero-write stop keeps (the road then reads `stopped`). The scheduler arms and queues only open
+  roads whose activation is `needs_departure`. Blocked (`stopped`), uncertain, planning and
+  building roads never arm. Queueing writes nothing: `extend` consumes the activation only after
+  it holds the slot, so a busy slot returns `busy` before any write.
+- **Admission goes through `extend`.** The scheduler checks the slot first (`slot_busy`); a
+  `busy` error from `extend` keeps the entry queued. At most one admission per tick. Any other
+  refusal removes that key (no retry for that crossing). Manual planning and outward jobs are
+  never cancelled.
+- **Cylinders.** Inside means horizontal distance at most 24 (or 36 for the outer radius) and
+  vertical difference at most 16. A sample outside the outer cylinder, including one 16 or more
+  nodes above or below, arms.
+- **Teleports.** Two consecutive samples of one player more than 72 nodes apart clear that
+  player's arming, so a long teleport is a first observation. A short move from just outside
+  36 cannot be told from walking and counts as an approach; this is a known limit of sampling.
+- **Window and eviction.** Retained players are the connected players in name order, up to 32.
+  With more, the window moves one name per tick. A player who leaves the window loses all arming
+  (slot eviction); readmission is a first observation. Disconnected players are removed the same
+  way, and an invalid or dead sample also clears arming (conservative against respawns).
+- **Work per tick.** At most 32 samples (the window; admission reuses this tick's samples, so
+  there are no extra samples) and 64 endpoint comparisons. Candidate endpoints come from the
+  player's 3x3 cells of 128 nodes and are sorted by road id; each retained player has a cursor
+  into that list, and the starting player rotates by tick.
+- **Arming bound.** At most 128 armed endpoints per player slot. Arming holds only the revision
+  it was observed on; a new revision, a road that is no longer open, or an evicted slot drops it.
+- **Queue (`scheduler.queue`, reusable for #42).** Keys are `road_id#revision`, at most 16
+  unique, FIFO, expiring at queued time plus 30 seconds, never renewed. A repeat from a player
+  already in the queue, or a second player for the same key, coalesces. Admission requires that
+  some owner was sampled this tick inside 24 nodes; this is a deliberate reading of "the
+  triggering player's continued proximity" once owners coalesce. An entry whose owners were not
+  sampled this tick waits until one is or it expires. A queued key whose road moved on is dropped.
+  Nothing is written for queued, refused or expired entries.
+- **Session only.** Arming, the window and the queue are memory only. A restart starts empty:
+  the first sample of a player is an observation, and an open endpoint needs a new approach.
+- **Automatic switch.** `roads_growth_automatic` (default `false`) is read in `init.lua`. Only
+  when it is true is a globalstep registered. The scheduler object always exists so that
+  `/roads_grow status` can explain the state. No `settingtypes.txt` entry was added.
+- **Status.** `/roads_grow status <road>` and the other summaries add: whether automatic growth
+  is enabled; the queue position, age and expiry; the number of armed players near the road; a
+  busy slot; and explicit blocked text for a stopped road (automatic growth never retries it).
+  The `roads_grow` description no longer says growth is never automatic.
+- **Engine evidence and gaps.** Launches with the setting on and off load the wiring in the
+  engine and exit cleanly, and the existing growth trial still passes with it. No trial drives
+  automatic scheduling: `tools/growth_trial` has no scripted player positions yet, so the
+  multi-segment, both-arrival, blocked, edited-seam and interruption world trials for this slice are
+  not done. The storage ordering checks tracked by #38 also remain open. Automatic growth stays
+  disabled until those are complete.

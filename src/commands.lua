@@ -237,8 +237,34 @@ function commands.growth_destination_lines(s)
     return lines
 end
 
--- Presentation of a growth-service summary (see src/growth.lua status).
-function commands.growth_summary(s)
+-- Automatic-growth lines from the proximity scheduler's facts for this road
+-- (src/growth_scheduler.lua status). Absent facts add nothing.
+local function automatic_lines(s,auto)
+    if type(auto)~="table" then return {} end
+    local lines={}
+    if auto.enabled then
+        lines[#lines+1]="Automatic growth is enabled: an approach within 24 nodes of an open endpoint queues one extension."
+    else
+        lines[#lines+1]="Automatic growth is disabled (roads_growth_automatic is off); only extend and retry grow this road."
+    end
+    local q=type(auto.queued)=="table" and auto.queued or nil
+    if q then
+        lines[#lines+1]=string.format("Queued for automatic growth: position %d of %d, waiting %d s, expires in %d s.",
+            tonumber(q.position) or 0,tonumber(q.of) or 0,tonumber(q.age) or 0,tonumber(q.expires_in) or 0)
+    elseif auto.enabled and s.state=="open" and s.activation=="needs_departure" then
+        lines[#lines+1]=string.format("Waiting for a player: approach within 24 nodes after being seen beyond 36 (%d armed nearby). Arming is session-only.",
+            tonumber(auto.armed) or 0)
+    end
+    if auto.slot_busy and q then lines[#lines+1]="The server slot is busy; queued growth waits for it and is not cancelled." end
+    if s.state=="stopped" then
+        lines[#lines+1]="Blocked: automatic growth never retries a stopped road; use retry after reviewing the reason."
+    end
+    return lines
+end
+
+-- Presentation of a growth-service summary (see src/growth.lua status). auto is
+-- the optional proximity scheduler status for this road.
+function commands.growth_summary(s,auto)
     if type(s)~="table" then return "No growth road is recorded for this identifier." end
     local hv=HEADING_VECTORS[(tonumber(s.local_heading) or 0)+1] or {0,0}
     local pv=s.preferred or {}
@@ -285,6 +311,7 @@ function commands.growth_summary(s)
         lines[#lines+1]=string.format("Connected to %s %s%s (approach %s).",tostring(s.connected.kind),tostring(s.connected.id),how,tostring(s.connected.approach_id))
     end
     if s.retired then lines[#lines+1]=string.format("Retired by %s; was %s.",tostring(s.retired.by),tostring(s.retired.was)) end
+    for _,line in ipairs(automatic_lines(s,auto)) do lines[#lines+1]=line end
     if s.explanation then lines[#lines+1]=s.explanation end
     lines[#lines+1]="Seam: not compared here; /roads_grow inspect compares the intended seam with the world. Adopt, extend and retry refuse an edited seam."
     return table.concat(lines," ")
@@ -449,13 +476,18 @@ function commands.register(engine,controller,surface,world_config,preview_render
         -- Arguments are checked here; the service owns every state decision and
         -- returns its own error codes. Nothing is written for a bad request.
         local service=growth.service
+        -- Proximity scheduler facts for one road (optional; read-only).
+        local function automatic(road_id)
+            if not growth.scheduler then return nil end
+            return growth.scheduler:status(road_id)
+        end
         local function with_status(text,road_id)
             local s,err=service:status(road_id)
             if not s then return text.." "..failure(err) end
-            return text.." "..commands.growth_summary(s)
+            return text.." "..commands.growth_summary(s,automatic(road_id))
         end
         engine.register_chatcommand("roads_grow",{params="adopt <outward-op-id> | extend|status|cancel|retry|retire|inspect <road-id>",
-            description="Adopt a built outward road for growth, or extend, inspect, cancel, retry or retire a growth road. Extending or retrying may generate terrain and builds one segment; growth is never automatic.",
+            description="Adopt a built outward road for growth, or extend, inspect, cancel, retry or retire a growth road. Extending or retrying may generate terrain and builds one segment. Growth is automatic only when the roads_growth_automatic setting is on; extend and retry are always explicit.",
             privs={server=true},
             func=function(name,param)
                 local words={}
@@ -479,7 +511,7 @@ function commands.register(engine,controller,surface,world_config,preview_render
                 elseif action=="status" then
                     local s,err=service:status(id)
                     if not s then return false,failure(err) end
-                    return true,commands.growth_summary(s)
+                    return true,commands.growth_summary(s,automatic(id))
                 elseif action=="cancel" then
                     local ok,err=service:cancel(id,name)
                     if not ok then return false,failure(err) end

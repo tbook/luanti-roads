@@ -45,10 +45,30 @@ rollback; use a disposable world while playtesting.
 Server-privileged `/roads_grow` manages growth from a built outward road:
 `adopt <outward-op-id>` records it for growth, and `extend`, `status`, `cancel`,
 `retry`, `retire` or `inspect <road-id>` act on the growth road. Extending or
-retrying may generate terrain and builds one segment; growth is never automatic.
+retrying may generate terrain and builds one segment; these commands are always explicit.
 When the optional Towns mod publishes completed settlements, a cycle steers toward
 a compatible published exit and, once it is in range, can build a verified arrival
 onto it; the road is only reported connected after its walking path is re-checked.
+
+### Automatic growth (disabled by default)
+
+Setting `roads_growth_automatic` (boolean, default `false`) lets a growth road
+extend by itself when a player approaches its open endpoint. It is off by
+default, and it stays off until the engine evidence for automatic writes is
+reviewed; enable it only in a disposable world. With the setting off there is
+no sampling and nothing calls `extend` automatically; `/roads_grow` is unchanged.
+
+When on, the server samples connected players about once per second. A player
+who has been seen more than 36 horizontal nodes from an open endpoint (or more
+than 16 nodes vertically away) and then comes within 24 nodes supplies one approach.
+Players first seen close to an endpoint, after a login, or after a long teleport
+do not. Each endpoint revision needs its own approach. Approaches queue (at most 16
+endpoints, expiring after 30 seconds, with duplicates coalesced) and start when the
+shared server slot is free; a planning or outward job that holds the slot is never
+cancelled. Blocked (`stopped`) endpoints are never retried automatically: use
+`/roads_grow retry`. Arming and the queue are session-only and are lost on restart.
+`/roads_grow status <road-id>` explains whether automatic growth is enabled, queued,
+waiting for a player, or blocked.
 
 ## Development
 
