@@ -24,6 +24,7 @@ local outward_store=load("src/outward_store.lua")
 local outward=load("src/outward.lua")
 local growth_store=load("src/growth_store.lua")
 local growth=load("src/growth.lua")
+local growth_scheduler=load("src/growth_scheduler.lua")
 local growth_policy=load("src/growth_policy.lua")
 local outward_policy=load("src/outward_policy.lua")
 
@@ -103,7 +104,8 @@ do
         serialize=core.serialize,
         deserialize=function(text) return core.deserialize(text,true) end,
         now=os.time})
-    -- Growth lifecycle. /roads_grow drives it; no scheduler does. Completed
+    -- Growth lifecycle. /roads_grow drives it. Automatic growth (player proximity,
+    -- src/growth_scheduler.lua) is off unless the roads_growth_automatic setting is true. Completed
     -- Towns settlements are the only destination provider: the provider is absent
     -- (cycles scan nothing and grow directionally) unless towns_api is installed,
     -- and an installed but unhealthy Towns fails a cycle closed. The outward
@@ -143,6 +145,38 @@ do
         find_operation=function(op_id) return outward_service and outward_service:operation(op_id) or nil end,
         log=function(level,message) core.log(level,message) end})
     if not growth_service then error("[roads] cannot initialize growth service: "..tostring(growth_error.reason)) end
+    -- Proximity activation (#53). Disabled by default: with the setting off there is
+    -- no globalstep and nothing calls extend automatically. Commands are unaffected.
+    local automatic=core.settings:get_bool("roads_growth_automatic",false)==true
+    local proximity,proximity_error=growth_scheduler.new({enabled=automatic,now=now,
+        connected=function()
+            local names={}
+            for _,player in ipairs(core.get_connected_players()) do names[#names+1]=player:get_player_name() end
+            return names
+        end,
+        sample=function(name)
+            local player=core.get_player_by_name(name)
+            if not player or player:get_hp()<=0 then return nil end
+            return surface.player_feet(player)
+        end,
+        roads=function()
+            local list={}
+            for _,id in ipairs(growth_db:road_ids()) do
+                local road=growth_db:road(id)
+                if road then
+                    list[#list+1]={road_id=id,revision=road.revision,endpoint=road.endpoint,state=road.state,activation=road.activation}
+                end
+            end
+            return list
+        end,
+        slot_busy=function() return controller.active~=nil end,
+        extend=function(road_id,actor) return growth_service:extend(road_id,actor) end,
+        log=function(level,message) core.log(level,message) end})
+    if not proximity then error("[roads] cannot initialize growth proximity scheduler: "..tostring(proximity_error.reason)) end
+    if automatic then
+        core.register_globalstep(function(dtime) proximity:step() end)
+        core.log("action","[roads] automatic growth is enabled (roads_growth_automatic)")
+    end
     local outward_ops={jobs=controller,growth=growth_service.hooks,towns=towns,store=store,now=now,after=ops.after,
         world_config=world_config,survey=survey,start_survey=ops.start_survey,
         exit_endpoints=ops.exit_endpoints,new_planner=ops.new_planner,compose=ops.compose,
@@ -165,7 +199,7 @@ do
     rawset(_G,"roads",{outward=service,growth=growth_service})
     outward_deps={service=service,towns=towns,policy=outward_policy,
         seed=function() return core.get_mapgen_setting("seed") end}
-    growth_deps={service=growth_service}
+    growth_deps={service=growth_service,scheduler=proximity}
 end
 assert(commands.register(core,controller,surface,world_config,preview_renderer,outward_deps,growth_deps))
 core.register_on_leaveplayer(function(player)

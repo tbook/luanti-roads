@@ -98,5 +98,43 @@ D never promoted, and `retire` keeping every claim. Markers: `GROWTH_TRIAL_T_JUN
 `GROWTH_TRIAL_END_JUNCTION`, `GROWTH_TRIAL_RESTART`, then `GROWTH_TRIAL_JUNCTION_RETRY` or
 `GROWTH_TRIAL_JUNCTION_INSPECT`.
 
-Not verified: player traversal, restart after a hard crash, partial writes
+## Scheduler scenario (`--scenario scheduler`, not part of `all`)
+
+Automatic growth by player proximity (#53) in its own disposable world (growth world with
+`away`; the `steer` town is 96 nodes further so the final attachment is the fifth cycle).
+`roads_growth_automatic = true` is set for the launch (the real `init.lua` logs that it is
+enabled), but the trial builds its own real `growth_scheduler` over the trial's growth service:
+only the player is scripted. `connected()` returns one scripted name and `sample()` its feet
+position; a driver moves it one waypoint per scheduler tick (the scheduler's real 1 s interval,
+12-node pace), so a walk is exactly a sequence of samples. No client is involved.
+
+```sh
+python3 tools/growth_trial/run.py --luanti /path/to/luanti --scenario scheduler [--mg-name flat|v7] [--interrupt planning|build]
+```
+
+Phase 1: a player first seen inside 24 nodes never arms (no start); automatic cycle 1 and cycle 2
+(`GROWTH_TRIAL_SCHEDULER_AUTO`, directional and the rejected-`away` fallback) each start at the
+first sample inside 24 after samples beyond 36, and the walk continues forward from the previous
+trigger point to the next endpoint without backtracking (a start before the last waypoint fails the
+trial); after the seam endpoint node is edited the next automatic start is refused `seam_changed`, is
+not repeated while the player stands inside, and nothing is repaired
+(`GROWTH_TRIAL_SCHEDULER_SEAM_REFUSED`); after restoring it, a scripted survey failure stops cycle 3
+(road `stopped`, `status` says automatic growth never retries), two further leave-and-return
+approaches and standing inside start nothing (`GROWTH_TRIAL_SCHEDULER_BLOCKED`), and a deliberate
+`retry` builds it with no scheduler involvement; cycle 4 is started by the scheduler and cut off
+(`GROWTH_TRIAL_INTERRUPT`, planning or build).
+Phase 2 (restart): with the scheduler running and a player standing at the endpoint for 10 ticks, nothing
+is started, surveyed or built and the interrupted state is unchanged (`GROWTH_TRIAL_SCHEDULER_NO_REPLAY`).
+`planning` then retries cycle 4 deliberately and cycle 5 is an automatic final attachment to the built
+exit (`GROWTH_TRIAL_SCHEDULER_ARRIVAL`: connected, walkable by the breadth-first oracle, exit claim held,
+inspect matches; a connected road does not grow again). `build` only covers the no-replay and refusal checks.
+
+Not covered by the scheduler scenario: real clients (login, teleport, leaving), several players,
+queue overflow/expiry and busy-slot behavior (pure Lua tests in `tests/growth_scheduler.lua`),
+a destination arrival onto a registered road (junction scenario has no scheduler), the real
+`init.lua` scheduler instance (the trial builds its own over the trial service; init only proves
+the setting enables the wiring), restart after a hard crash. The blocked stop is a scripted survey
+failure, not a naturally unroutable terrain.
+
+Not verified (growth and junction scenarios): player traversal, restart after a hard crash, partial writes
 inside one builder tick, or the real Towns API.

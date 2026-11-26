@@ -18,9 +18,10 @@ parser.add_argument('--mg-name', default='singlenode', choices=['singlenode', 'f
 parser.add_argument('--interrupt', default='planning', choices=['planning', 'build'],
     help='where the fourth cycle is cut off before the restart: during planning (zero writes, '
          'expect stopped) or right after construction (expect uncertain)')
-parser.add_argument('--scenario', default='all', choices=['growth', 'junction', 'all'],
+parser.add_argument('--scenario', default='all', choices=['growth', 'junction', 'scheduler', 'all'],
     help='growth: bends, Towns attachment and interruption; junction: roads joining roads (T and end to end, '
-         'interruption in a second disposable world); all runs both')
+         'interruption in a second disposable world); scheduler: automatic growth by scripted player proximity '
+         '(own disposable world, not part of all); all runs growth and junction')
 parser.add_argument('--world', help='reuse this existing trial world instead of creating one (use with --phase 2 and one --scenario)')
 parser.add_argument('--phase', type=int, choices=[1, 2], help='run only this phase (2 needs --world)')
 args = parser.parse_args()
@@ -50,9 +51,9 @@ def launch(world, phase, pass_marker, scenario):
     config = world / f'trial-phase{phase}.conf'
     config.write_text(f'mg_name = {args.mg_name}\nserver_announce = false\nport = 30126\n'
         'mg_flags = nodecorations,nocaves,nodungeons\nserver_unload_unused_data_timeout = 100000\nserver_map_save_interval = 5.3\n'
-        f'roads_trial_phase = {phase}\nroads_trial_interrupt = {args.interrupt}\nroads_trial_scenario = {scenario}\n')
+        f'roads_growth_automatic = {str(scenario == "scheduler").lower()}\nroads_trial_phase = {phase}\nroads_trial_interrupt = {args.interrupt}\nroads_trial_scenario = {scenario}\n')
     result = subprocess.run([args.luanti, '--server', '--world', str(world), '--config', str(config),
-        '--logfile', ''], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=420)
+        '--logfile', ''], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=900)
     log = world / f'trial-phase{phase}-output.txt'
     log.write_text(result.stdout)
     print(f'--- phase {phase} ---', flush=True)
